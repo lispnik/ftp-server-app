@@ -1,0 +1,182 @@
+# Build a safepoint SBCL, run the suite, build the bundle, and talk FTP to it.
+#
+# WHY SAFEPOINTS.  The server's threads share the image with AppKit, and on
+# macOS a garbage collection that catches libdispatch worker threads inside
+# Lisp kills a stock SBCL outright.  The application is built on a safepoint
+# SBCL, so that is what CI must test it on.  See lispnik/objc,
+# doc/sbcl-libdispatch-safepoint.md.
+#
+# NO SIBLING CHECKOUTS.  ocicl.csv pins everything, objc and asdf-macos-app
+# included, and the Makefile's source registry is this tree and nothing else,
+# so a dependency missing from the lockfile fails here.
+#
+# STEP ORDER IS LOAD BEARING.  SBCL is built before ocicl is set up: an SBCL
+# contrib build calls UPGRADE-ASDF, and a source registry with any ASDF source
+# on it fails that build.
+
+name: macOS
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # A pinned release tag, never a branch: the cache key is made from it.
+  SBCL_TAG: sbcl-2.6.8
+
+jobs:
+  test:
+    name: sbcl --with-sb-safepoint · ${{ matrix.os }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    # So that a wedged runner fails rather than waits.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            arch: arm64
+          # macos-13 is retired, and a job that names it queues for ever.
+          - os: macos-26-intel
+            arch: x86-64
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Settle on where the safepoint SBCL lives
+        # Outside the workspace: SBCL's sources must never be on the registry.
+        run: echo "SAFEPOINT_PREFIX=$HOME/sbcl-safepoint" >> "$GITHUB_ENV"
+
+      - name: Install a host SBCL and OpenSSL
+        # The host SBCL only compiles the real one.  OpenSSL is what cl+ssl
+        # loads, from Homebrew's opt/openssl, and what the bundle copies.
+        run: brew install sbcl openssl
+
+      - name: Cache the safepoint SBCL
+        id: sbcl-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/sbcl-safepoint
+          key: sbcl-safepoint-${{ runner.os }}-${{ runner.arch }}-${{ env.SBCL_TAG }}
+
+      - name: Build SBCL with safepoints
+        if: steps.sbcl-cache.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          git clone --depth 1 --branch "$SBCL_TAG" \
+            https://github.com/sbcl/sbcl.git "$RUNNER_TEMP/sbcl-src"
+          cd "$RUNNER_TEMP/sbcl-src"
+          ./make.sh --with-sb-safepoint --prefix="$SAFEPOINT_PREFIX"
+          INSTALL_ROOT="$SAFEPOINT_PREFIX" sh install.sh
+
+      - name: Verify the build really has safepoints
+        # Everything after this passes on a stock build too, so without it a
+        # run that came out without safepoints would be green for nothing.
+        run: |
+          echo "SBCL_SAFEPOINT=$SAFEPOINT_PREFIX/bin/sbcl" >> "$GITHUB_ENV"
+          "$SAFEPOINT_PREFIX/bin/sbcl" --non-interactive --no-userinit --no-sysinit \
+            --eval '(format t "~&version: ~a~%safepoint: ~a~%" (lisp-implementation-version) (and (member :sb-safepoint *features*) t))' \
+            --eval '(sb-ext:exit :code (if (member :sb-safepoint *features*) 0 1))'
+
+      - name: Install ocicl
+        run: |
+          git clone --depth 1 https://github.com/ocicl/ocicl.git "$HOME/ocicl-src"
+          ( cd "$HOME/ocicl-src" && sbcl --non-interactive --load setup.lisp )
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Restore dependencies
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          ocicl setup
+          # ocicl exits 0 when a download fails, and the registry fails often
+          # enough to matter: several attempts, and a failure here rather than
+          # a mystery later.
+          for attempt in 1 2 3 4 5; do
+            make deps 2>&1 | tee "$RUNNER_TEMP/ocicl-install.log"
+            if ! grep -q "failed to install" "$RUNNER_TEMP/ocicl-install.log"; then
+              break
+            fi
+            echo "::warning::ocicl install attempt $attempt did not get every package"
+            sleep 30
+          done
+          if grep -q "failed to install" "$RUNNER_TEMP/ocicl-install.log"; then
+            echo "::error::ocicl could not install every dependency after 5 attempts" >&2
+            exit 1
+          fi
+          echo "restored:" && ls ocicl
+
+      - name: Run the tests
+        # The server over real sockets, TLS with a real handshake, and the
+        # real window driven without being shown.  macOS ships no timeout(1);
+        # perl's alarm stands in, so a wedged test fails in minutes.
+        run: |
+          set -o pipefail
+          perl -e 'alarm shift; exec @ARGV' 900 make test SBCL="$SBCL_SAFEPOINT" 2>&1 | tee test.log
+          # A suite that skipped its windowed tests is a green run of fewer
+          # checks.  Said out loud, not failed: a runner may have no display.
+          grep -E "^ +Skip: +[1-9]" test.log && echo "::warning::some tests were skipped; see the log" || true
+
+      - name: Build the bundle
+        run: |
+          set -eux
+          make app SBCL="$SBCL_SAFEPOINT"
+          APP="build/FTP Server.app"
+          test -d "$APP"
+          plutil -lint "$APP/Contents/Info.plist"
+          codesign --verify --deep --strict "$APP"
+          # The bundle's own OpenSSL, which is the one it is to use.
+          ls "$APP/Contents/Frameworks"
+          ls "$APP/Contents/Frameworks" | grep -q '^libssl'
+          ls "$APP/Contents/Frameworks" | grep -q '^libcrypto'
+
+      - name: Run the bundle and talk FTP to it
+        # The saved image is where a Lisp-defined Objective-C class and a
+        # reopened library stop surviving, and no test above runs in it.
+        run: |
+          set -eux
+          WORK="$RUNNER_TEMP/selftest"
+          mkdir -p "$WORK/shared"
+          echo "hello from the bundle" > "$WORK/shared/hello.txt"
+          head -c 5242880 /dev/urandom > "$WORK/big.bin"
+          cat > "$WORK/settings.lisp" <<SETTINGS
+          (:version 1 :username "u" :password "p4ss" :port 2198
+           :mappings ((:name "tempdir" :path "$WORK/shared" :writable t)))
+          SETTINGS
+          export MACOS_APP_LOG="$WORK/bundle.log"
+          # env -u SBCL_HOME: Homebrew's sbcl exports it, and a bundle started
+          # with it set loads the wrong core.
+          env -u SBCL_HOME FTP_SERVER_SETTINGS="$WORK/settings.lisp" FTP_SERVER_SELFTEST=60 \
+            "build/FTP Server.app/Contents/MacOS/ftp-server" &
+          APP_PID=$!
+          U=ftp://127.0.0.1:2198
+          C="curl -sS --max-time 60 --user u:p4ss"
+          curl -sS --retry 30 --retry-connrefused --retry-delay 1 --user u:p4ss "$U/" | tee "$WORK/root.txt"
+          grep -q tempdir "$WORK/root.txt"
+          test "$($C "$U/tempdir/hello.txt")" = "hello from the bundle"
+          $C -T "$WORK/big.bin" "$U/tempdir/"
+          cmp "$WORK/big.bin" "$WORK/shared/big.bin"
+          # The same again over TLS, control and data.
+          test "$($C --ssl-reqd -k "$U/tempdir/hello.txt")" = "hello from the bundle"
+          $C --ssl-reqd -k -T "$WORK/big.bin" "$U/tempdir/tls.bin"
+          cmp "$WORK/big.bin" "$WORK/shared/tls.bin"
+          # And from the library in the bundle, not Homebrew's.
+          lsof -p "$APP_PID" | grep libssl | tee "$WORK/libssl.txt"
+          grep -q "Contents/Frameworks" "$WORK/libssl.txt"
+          # A wrong password is refused.
+          if curl -sS --max-time 20 --user u:wrong "$U/"; then
+            echo "::error::a wrong password was accepted" >&2; exit 1
+          fi
+          kill "$APP_PID" || true
+          cat "$MACOS_APP_LOG"
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-${{ matrix.arch }}
+          path: |
+            test.log
+            ${{ runner.temp }}/selftest/bundle.log
+          if-no-files-found: ignore
