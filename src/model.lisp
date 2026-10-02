@@ -271,3 +271,74 @@ Answers (values T NIL), or (values NIL MESSAGE)."
                   (if (model-allow-remote model) "all interfaces" "this computer only")
                   (server-port server)
                   clients)))))
+
+;;; The activity log -------------------------------------------------------------------
+;;;
+;;; What the window's activity pane is a table of.  Here, and not with the
+;;; window, because what a row says and what order the rows go in need no
+;;; window to decide or to test.
+
+(defstruct activity-entry
+  (sequence 0)                          ; the order they happened in
+  (time 0)                              ; a universal time
+  (user nil)                            ; a string, or NIL
+  (address nil)                         ; a vector of octets, or NIL for the server itself
+  (message ""))
+
+(defparameter *activity-columns* '("time" "user" "address" "message")
+  "The columns of the activity pane, in the order they are shown.")
+
+(defun format-activity-time (time)
+  "TIME as the pane shows it: the date and the time of day, here."
+  (multiple-value-bind (second minute hour day month year) (decode-universal-time time)
+    (format nil "~4,'0d-~2,'0d-~2,'0d ~2,'0d:~2,'0d:~2,'0d"
+            year month day hour minute second)))
+
+(defun activity-cell (entry column)
+  "What ENTRY shows in COLUMN, one of *ACTIVITY-COLUMNS*.
+
+A client that has not logged in is \"anon\".  A line that is the server's own,
+about no client at all, has a dash for both the user and the address."
+  (let ((address (activity-entry-address entry))
+        (user (activity-entry-user entry)))
+    (cond ((string= column "time") (format-activity-time (activity-entry-time entry)))
+          ((string= column "user")
+           (cond ((and user (plusp (length user))) user)
+                 (address "anon")
+                 (t "-")))
+          ((string= column "address")
+           (if address (address-string address) "-"))
+          (t (activity-entry-message entry)))))
+
+(defun address-before-p (a b)
+  "Whether address A sorts before B: none before any, IPv4 before IPv6, and
+otherwise by number, so that 10.0.0.9 is before 10.0.0.10."
+  (cond ((null a) (and b t))
+        ((null b) nil)
+        ((/= (length a) (length b)) (< (length a) (length b)))
+        (t (let ((differ (mismatch a b)))
+             (and differ (< (aref a differ) (aref b differ)))))))
+
+(defun sort-activity (entries column ascending)
+  "ENTRIES in order of COLUMN, as a fresh list.  Rows that are the same in
+that column stay in the order they happened, whichever way the sort runs --
+except by time, where the order they happened is the order: two rows in the
+same second are still one before the other, and turn round with the rest."
+  (let* ((before
+           (cond ((string= column "time")
+                  (lambda (a b)
+                    (or (< (activity-entry-time a) (activity-entry-time b))
+                        (and (= (activity-entry-time a) (activity-entry-time b))
+                             (< (activity-entry-sequence a)
+                                (activity-entry-sequence b))))))
+                 ((string= column "address")
+                  (lambda (a b) (address-before-p (activity-entry-address a)
+                                                  (activity-entry-address b))))
+                 (t
+                  (lambda (a b) (string-lessp (activity-cell a column)
+                                              (activity-cell b column))))))
+         (ordered (if ascending
+                      before
+                      (lambda (a b) (funcall before b a)))))
+    (stable-sort (sort (copy-list entries) #'< :key #'activity-entry-sequence)
+                 ordered)))

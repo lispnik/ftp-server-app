@@ -70,9 +70,30 @@
 (defun status (controller)
   (objc:invoke-into 'string (fs::controller-status-label controller) "stringValue"))
 
+(defun activity-rows (controller)
+  "What the activity pane shows, asked of its data source: a list of rows,
+each a list of the time, the user, the address and the message."
+  (let ((table (fs::controller-activity-table controller)))
+    (loop for row below (objc:invoke table "numberOfRows")
+          collect (loop for key in fs::*activity-columns*
+                        collect (objc:invoke-into
+                                 'string (target controller)
+                                 "tableView:objectValueForTableColumn:row:"
+                                 table (objc:invoke table "tableColumnWithIdentifier:" key)
+                                 row)))))
+
+(defun activity-messages (controller)
+  (mapcar #'fourth (activity-rows controller)))
+
 (defun activity-text (controller)
-  "What the activity pane shows, asked of the text view itself."
-  (objc:invoke-into 'string (fs::controller-activity-view controller) "string"))
+  "The rows without their times, one to a line, as user, address and message."
+  (format nil "~:{~*~a ~a ~a~%~}" (activity-rows controller)))
+
+(defun sort-activity-by (controller key ascending)
+  "What a click on a header does: change the table's sort descriptors."
+  (objc:invoke (fs::controller-activity-table controller) "setSortDescriptors:"
+               (vector (objc:invoke "NSSortDescriptor" "sortDescriptorWithKey:ascending:"
+                                    key ascending))))
 
 (defun title (button)
   (objc:invoke-into 'string button "title"))
@@ -193,9 +214,10 @@
                   (lambda ()
                     (objc.runloop:pump-run-loop :seconds 0.01d0)
                     (search "listed /" (activity-text controller)))))
-        (is (search "ann@127.0.0.1  logged in" (activity-text controller)))
-        (is (search "127.0.0.1  connected" (activity-text controller)))
-        (is (search "server started on port" (activity-text controller)))
+        (is (search "ann 127.0.0.1 logged in" (activity-text controller)))
+        ;; Before it logged in it had no name.
+        (is (search "anon 127.0.0.1 connected" (activity-text controller)))
+        (is (search "- - server started on port" (activity-text controller)))
         (is (null (search "pw" (activity-text controller)))))
       (objc:invoke button "performClick:" (cffi:null-pointer))
       (is-false (fs:model-running-p (fs::controller-model controller)))
@@ -227,21 +249,83 @@
     (is (null fs::*bonjour-status*))
     (is (null fs::*bonjour-service*))))
 
-(test the-activity-pane-keeps-only-so-many-lines
+(test the-activity-pane-keeps-only-so-many-rows
   (with-controller (controller)
     (let ((limit fs::*activity-limit*))
       (setf fs::*activity-limit* 5)
       (unwind-protect
            (progn
              (dotimes (index 12)
-               (fs::controller-add-activity controller "ann@127.0.0.1"
+               (fs::controller-add-activity controller "ann" #(127 0 0 1)
                                             (format nil "did thing ~d" index)))
-             (let ((lines (uiop:split-string (activity-text controller)
-                                             :separator '(#\Newline))))
-               (is (= 5 (length lines)))
-               (is (search "did thing 7" (first lines)))
-               (is (search "did thing 11" (fifth lines)))))
+             (is (equal '("did thing 7" "did thing 8" "did thing 9"
+                          "did thing 10" "did thing 11")
+                        (activity-messages controller)))
+             ;; The oldest go, not whichever are last in the order on show.
+             (sort-activity-by controller "time" nil)
+             (fs::controller-add-activity controller "ann" #(127 0 0 1) "did thing 12")
+             (is (equal '("did thing 12" "did thing 11" "did thing 10"
+                          "did thing 9" "did thing 8")
+                        (activity-messages controller))))
         (setf fs::*activity-limit* limit)))))
+
+(test the-activity-pane-has-four-columns-with-headers
+  (with-controller (controller)
+    (let* ((table (fs::controller-activity-table controller))
+           (columns (objc:invoke table "tableColumns")))
+      (is (equal '("Time" "User" "IP Address" "Message")
+                 (loop for index below (objc:invoke columns "count")
+                       collect (objc:invoke-into 'string
+                                                 (objc:invoke columns "objectAtIndex:" index)
+                                                 "title"))))
+      (is-false (cffi:null-pointer-p (objc:invoke table "headerView")))
+      ;; Every header can be clicked to sort.
+      (is (loop for index below (objc:invoke columns "count")
+                never (cffi:null-pointer-p
+                       (objc:invoke (objc:invoke columns "objectAtIndex:" index)
+                                    "sortDescriptorPrototype")))))))
+
+(test a-row-says-when-who-from-where-and-what
+  (with-controller (controller)
+    (fs::controller-add-activity controller "ann" #(192 168 1 20) "logged in")
+    (fs::controller-add-activity controller nil #(192 168 1 21) "connected")
+    (fs::controller-add-activity controller nil nil "server stopped")
+    (destructuring-bind (first second third) (activity-rows controller)
+      (is (= 19 (length (first first))) "a date and a time")
+      (is (char= #\- (char (first first) 4)))
+      (is (char= #\: (char (first first) 13)))
+      (is (equal '("ann" "192.168.1.20" "logged in") (rest first)))
+      (is (equal '("anon" "192.168.1.21" "connected") (rest second)))
+      (is (equal '("-" "-" "server stopped") (rest third))))))
+
+(test clicking-a-header-sorts-the-activity-pane
+  (with-controller (controller)
+    (fs::controller-add-activity controller "carol" #(10 0 0 10) "uploaded /a")
+    (fs::controller-add-activity controller "ann" #(10 0 0 9) "listed /")
+    (fs::controller-add-activity controller nil #(10 0 0 200) "connected")
+    (fs::controller-add-activity controller "bob" fs::*loopback6* "downloaded /b")
+    ;; As they happened, to begin with.
+    (is (equal '("uploaded /a" "listed /" "connected" "downloaded /b")
+               (activity-messages controller)))
+    (flet ((users () (mapcar #'second (activity-rows controller)))
+           (addresses () (mapcar #'third (activity-rows controller))))
+      (sort-activity-by controller "user" t)
+      (is (equal '("ann" "anon" "bob" "carol") (users)))
+      (sort-activity-by controller "user" nil)
+      (is (equal '("carol" "bob" "anon" "ann") (users)))
+      ;; By number, not by spelling: 9 comes before 10.  IPv6 after IPv4.
+      (sort-activity-by controller "address" t)
+      (is (equal '("10.0.0.9" "10.0.0.10" "10.0.0.200" "::1") (addresses)))
+      (sort-activity-by controller "message" t)
+      (is (equal '("connected" "downloaded /b" "listed /" "uploaded /a")
+                 (activity-messages controller)))
+      (sort-activity-by controller "time" nil)
+      (is (equal '("downloaded /b" "connected" "listed /" "uploaded /a")
+                 (activity-messages controller)))
+      ;; A row that arrives is put where the order says it goes.
+      (sort-activity-by controller "user" t)
+      (fs::controller-add-activity controller "ben" #(10 0 0 1) "logged in")
+      (is (equal '("ann" "anon" "ben" "bob" "carol") (users))))))
 
 (test starting-at-launch-is-a-setting-like-the-others
   (with-controller (controller directory)

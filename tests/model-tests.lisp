@@ -231,3 +231,47 @@ GET a function answering what it now holds.  With FAIL it refuses to store."
         (is-true (fs:model-save model (settings-in directory)))
         (is (string= "hunter2"
                      (fs:model-password (fs:model-load (settings-in directory)))))))))
+
+;;; The activity log -----------------------------------------------------------------
+
+(defun entry (sequence user address message &optional (time 0))
+  (fs::make-activity-entry :sequence sequence :time time :user user
+                           :address address :message message))
+
+(test an-activity-row-names-nobody-as-anon-and-the-server-as-a-dash
+  (is (string= "ann" (fs::activity-cell (entry 1 "ann" #(10 0 0 1) "x") "user")))
+  (is (string= "anon" (fs::activity-cell (entry 1 nil #(10 0 0 1) "x") "user")))
+  (is (string= "anon" (fs::activity-cell (entry 1 "" #(10 0 0 1) "x") "user")))
+  (is (string= "-" (fs::activity-cell (entry 1 nil nil "x") "user")))
+  (is (string= "10.0.0.1" (fs::activity-cell (entry 1 nil #(10 0 0 1) "x") "address")))
+  (is (string= "-" (fs::activity-cell (entry 1 nil nil "x") "address")))
+  (is (string= "x" (fs::activity-cell (entry 1 nil nil "x") "message")))
+  (is (= 19 (length (fs::activity-cell (entry 1 nil nil "x" (get-universal-time)) "time")))))
+
+(test addresses-sort-by-number
+  (is-true (fs::address-before-p #(10 0 0 9) #(10 0 0 10)))
+  (is-false (fs::address-before-p #(10 0 0 10) #(10 0 0 9)))
+  (is-false (fs::address-before-p #(10 0 0 9) #(10 0 0 9)))
+  (is-true (fs::address-before-p nil #(10 0 0 9)))
+  (is-false (fs::address-before-p #(10 0 0 9) nil))
+  (is-false (fs::address-before-p nil nil))
+  (is-true (fs::address-before-p #(255 255 255 255) fs::*loopback6*)))
+
+(test rows-alike-in-the-sorted-column-stay-in-the-order-they-happened
+  (let ((entries (list (entry 3 "ann" #(10 0 0 1) "c" 100)
+                       (entry 1 "ann" #(10 0 0 1) "a" 100)
+                       (entry 4 "bob" #(10 0 0 1) "d" 100)
+                       (entry 2 "ann" #(10 0 0 1) "b" 100))))
+    (flet ((order (column ascending)
+             (mapcar #'fs::activity-entry-sequence
+                     (fs::sort-activity entries column ascending))))
+      ;; All in the same second.
+      (is (equal '(1 2 3 4) (order "time" t)))
+      ;; By time, newest first is newest first even within one second.
+      (is (equal '(4 3 2 1) (order "time" nil)))
+      (is (equal '(1 2 3 4) (order "user" t)))
+      (is (equal '(4 1 2 3) (order "user" nil)))
+      (is (equal '(1 2 3 4) (order "address" nil)))
+      (is (equal '(4 3 2 1) (order "message" nil)))
+      ;; And the list it was given is as it was.
+      (is (equal '(3 1 4 2) (mapcar #'fs::activity-entry-sequence entries))))))

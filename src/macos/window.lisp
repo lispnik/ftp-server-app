@@ -17,9 +17,15 @@
    (remote-checkbox :initform nil :accessor controller-remote-checkbox)
    (launch-checkbox :initform nil :accessor controller-launch-checkbox)
    (tls-checkbox :initform nil :accessor controller-tls-checkbox)
-   (activity-view :initform nil :accessor controller-activity-view)
+   (activity-table :initform nil :accessor controller-activity-table)
    (activity :initform '() :accessor controller-activity
-             :documentation "The lines of the activity pane, newest first.")
+             :documentation "The activity pane's entries, newest first.")
+   (activity-rows :initform #() :accessor controller-activity-rows
+                  :documentation "The same entries in the order the table shows.")
+   (activity-count :initform 0 :accessor controller-activity-count)
+   (activity-sort :initform "time" :accessor controller-activity-sort
+                  :documentation "The column the activity table is sorted on.")
+   (activity-ascending :initform t :accessor controller-activity-ascending)
    (remove-button :initform nil :accessor controller-remove-button)
    (start-button :initform nil :accessor controller-start-button)
    (status-label :initform nil :accessor controller-status-label)
@@ -135,50 +141,64 @@ not one; the other fields are taken as they are."
 ;;; Starting and stopping -------------------------------------------------------------
 
 (defparameter *activity-limit* 500
-  "How many lines the activity pane keeps.")
+  "How many rows the activity pane keeps.")
 
-(defun controller-add-activity (controller who text)
-  "Add a line to the activity pane, and to the log: the time, WHO did it if
-anyone, and TEXT."
-  (multiple-value-bind (second minute hour) (get-decoded-time)
-    (let ((line (format nil "~2,'0d:~2,'0d:~2,'0d  ~@[~a  ~]~a" hour minute second who text))
-          (view (controller-activity-view controller)))
-      (note "~@[~a  ~]~a" who text)
-      (push line (controller-activity controller))
-      (when (> (length (controller-activity controller)) *activity-limit*)
-        (setf (controller-activity controller)
-              (subseq (controller-activity controller) 0 *activity-limit*)))
-      (objc:invoke view "setString:"
-                   (format nil "~{~a~^~%~}" (reverse (controller-activity controller))))
-      ;; Keep the newest line in view.
-      (objc:invoke view "scrollRangeToVisible:"
-                   (cons (objc:invoke (objc:invoke view "string") "length") 0))
-      line)))
+(defun show-activity (controller)
+  "Put the activity table's rows in the order its header asks for, and show
+them."
+  (let ((table (controller-activity-table controller)))
+    (setf (controller-activity-rows controller)
+          (coerce (sort-activity (controller-activity controller)
+                                 (controller-activity-sort controller)
+                                 (controller-activity-ascending controller))
+                  'vector))
+    (objc:invoke table "reloadData")
+    ;; In order of time, keep the newest row in view, whichever end it is at.
+    ;; In any other order there is no such end, and the table is left alone.
+    (when (and (string= "time" (controller-activity-sort controller))
+               (plusp (length (controller-activity-rows controller))))
+      (objc:invoke table "scrollRowToVisible:"
+                   (if (controller-activity-ascending controller)
+                       (1- (length (controller-activity-rows controller)))
+                       0)))))
 
-(defun client-name (user address)
-  "Who a line of activity is about: the user, once there is one, and where
-they are connecting from."
-  (format nil "~@[~a@~]~a"
-          (and user (plusp (length user)) user)
-          (if address (address-string address) "?")))
+(defun controller-add-activity (controller user address message)
+  "Add a row to the activity pane, and a line to the log.  USER is a name or
+NIL; ADDRESS is where the client is, or NIL for something the server itself did."
+  (let ((entry (make-activity-entry
+                :sequence (incf (controller-activity-count controller))
+                :time (get-universal-time)
+                :user user :address address :message message)))
+    (note "~@[~a  ~]~a"
+          (and address
+               (format nil "~@[~a@~]~a" (and user (plusp (length user)) user)
+                       (address-string address)))
+          message)
+    (push entry (controller-activity controller))
+    (when (> (length (controller-activity controller)) *activity-limit*)
+      ;; The oldest go, whatever order is on show.
+      (setf (controller-activity controller)
+            (subseq (controller-activity controller) 0 *activity-limit*)))
+    (show-activity controller)
+    entry))
 
 (defun controller-server-event (controller event arguments)
   "On the main thread, for something a server thread said."
   (ecase event
     (:activity
      (destructuring-bind (user address text) arguments
-       (controller-add-activity controller (client-name user address) text)))
+       (controller-add-activity controller user address text)))
     (:client-connected
-     (controller-add-activity controller (client-name nil (first arguments)) "connected"))
+     (controller-add-activity controller nil (first arguments) "connected"))
     (:client-disconnected
-     (controller-add-activity controller (client-name nil (first arguments)) "disconnected"))
+     (controller-add-activity controller nil (first arguments) "disconnected"))
     (:started
-     (controller-add-activity controller nil
+     (controller-add-activity controller nil nil
                               (format nil "server started on port ~d" (first arguments))))
     (:stopped
-     (controller-add-activity controller nil "server stopped"))
+     (controller-add-activity controller nil nil "server stopped"))
     (:log
-     (controller-add-activity controller nil (first arguments))))
+     (controller-add-activity controller nil nil (first arguments))))
   (refresh-controls controller))
 
 (defun controller-start (controller)
@@ -195,7 +215,7 @@ they are connecting from."
                                                                arguments)))))))
       (when ok
         (when (model-tls-description model)
-          (controller-add-activity controller nil (model-tls-description model)))
+          (controller-add-activity controller nil nil (model-tls-description model)))
         (when (model-advertise-p model)
           (handler-case
               (bonjour-publish (server-port (model-server model))
@@ -282,9 +302,17 @@ they are connecting from."
       ""
       (or (objc:invoke-into 'string column "identifier") "")))
 
+(defun activity-table-p (controller table)
+  "Whether TABLE is the activity pane rather than the table of folders.  The
+controller is the data source of both."
+  (let ((activity (controller-activity-table controller)))
+    (and activity (cffi:pointer-eq table activity))))
+
 (define-controller-method ("numberOfRowsInTableView:" :long :on-error 0)
     ((table objc:objc-object-pointer))
-  (length (model-mappings (controller-model self))))
+  (if (activity-table-p self table)
+      (length (controller-activity-rows self))
+      (length (model-mappings (controller-model self)))))
 
 (define-controller-method ("tableView:objectValueForTableColumn:row:"
                            objc:objc-object-pointer
@@ -292,11 +320,17 @@ they are connecting from."
     ((table objc:objc-object-pointer)
      (column objc:objc-object-pointer)
      (row :long))
-  (let ((mapping (model-mapping (controller-model self) row))
+  (let ((mapping (and (not (activity-table-p self table))
+                      (model-mapping (controller-model self) row)))
         (key (column-key column)))
     ;; Autoreleased: an object a Lisp method answers is the caller's to release,
     ;; and a table releases nothing it is given here.
-    (cond ((null mapping) (cffi:null-pointer))
+    (cond ((activity-table-p self table)
+           (let ((rows (controller-activity-rows self)))
+             (if (< -1 row (length rows))
+                 (objc:string-to-ns-string (activity-cell (aref rows row) key) t)
+                 (cffi:null-pointer))))
+          ((null mapping) (cffi:null-pointer))
           ((string= key "writable")
            (objc:invoke "NSNumber" "numberWithBool:" (mapping-writable mapping)))
           ((string= key "path")
@@ -312,6 +346,8 @@ they are connecting from."
   (let ((model (controller-model self))
         (key (column-key column)))
     (cond ((null-object-p value))
+          ;; Nothing in the activity pane is to be changed.
+          ((activity-table-p self table))
           ((string= key "writable")
            (model-set-writable model row (objc:invoke-bool value "boolValue"))
            (controller-changed self))
@@ -327,6 +363,23 @@ they are connecting from."
 (define-controller-method ("tableViewSelectionDidChange:" :void)
     ((notification objc:objc-object-pointer))
   (refresh-controls self))
+
+;;; A click on a column's header changes the table's sort descriptors, and
+;;; this is how the table says so.  The first descriptor is the column just
+;;; clicked and which way; the sorting itself is done here, in Lisp.
+(define-controller-method ("tableView:sortDescriptorsDidChange:" :void)
+    ((table objc:objc-object-pointer) (old objc:objc-object-pointer))
+  (when (activity-table-p self table)
+    (let ((descriptors (objc:invoke table "sortDescriptors")))
+      (when (and (not (null-object-p descriptors))
+                 (plusp (objc:invoke descriptors "count")))
+        (let* ((first (objc:invoke descriptors "objectAtIndex:" 0))
+               (key (objc:invoke-into 'string first "key")))
+          (when (member key *activity-columns* :test #'equal)
+            (setf (controller-activity-sort self) key
+                  (controller-activity-ascending self)
+                  (objc:invoke-bool first "ascending"))
+            (show-activity self)))))))
 
 ;;; Building it -----------------------------------------------------------------------
 
@@ -355,13 +408,18 @@ they are connecting from."
     (objc:invoke content "addSubview:" button)
     button))
 
-(defun add-column (table key title width &key editable checkbox (resizing 2))
+(defun add-column (table key title width &key editable checkbox (resizing 2) sortable)
   (let ((column (objc:invoke (objc:invoke "NSTableColumn" "alloc")
                              "initWithIdentifier:" key)))
     (objc:invoke column "setTitle:" title)
     (objc:invoke column "setWidth:" width)
     (objc:invoke column "setResizingMask:" resizing)
     (objc:invoke column "setEditable:" editable)
+    (when sortable
+      ;; What a click on this column's header asks for: its key, ascending
+      ;; first.  The header draws the arrow.
+      (objc:invoke column "setSortDescriptorPrototype:"
+                   (objc:invoke "NSSortDescriptor" "sortDescriptorWithKey:ascending:" key t)))
     (when checkbox
       (let ((cell (objc:invoke (objc:invoke "NSButtonCell" "alloc") "init")))
         (objc:invoke cell "setButtonType:" +ns-button-type-switch+)
@@ -401,9 +459,9 @@ they are connecting from."
     (objc:release scroll)
     table))
 
-(defparameter +window-width+ 560d0)
-(defparameter +window-height+ 704d0)
-(defparameter +activity-height+ 120d0)
+(defparameter +window-width+ 680d0)
+(defparameter +window-height+ 740d0)
+(defparameter +activity-height+ 156d0)
 
 (defun add-checkbox (content title frame mask target)
   (let ((checkbox (objc:invoke "NSButton" "checkboxWithTitle:target:action:"
@@ -413,29 +471,40 @@ they are connecting from."
     (objc:invoke content "addSubview:" checkbox)
     checkbox))
 
-(defun add-activity-view (content frame mask)
-  "The activity pane: text that cannot be edited, in a scroll view.  Answers
-the text view."
+(defun add-activity-table (content frame mask target)
+  "The activity pane: a table of when, who, from where and what, sorted by a
+click on any of its headers.  Answers the table."
   (let ((scroll (objc:invoke (objc:invoke "NSScrollView" "alloc") "initWithFrame:" frame))
-        (text (objc:invoke (objc:invoke "NSTextView" "alloc") "initWithFrame:"
-                           (vector 0d0 0d0 (aref frame 2) (aref frame 3)))))
-    (objc:invoke text "setEditable:" nil)
-    (objc:invoke text "setSelectable:" t)
-    (objc:invoke text "setRichText:" nil)
-    (objc:invoke text "setFont:"
-                 (objc:invoke "NSFont" "monospacedSystemFontOfSize:weight:" 11d0 0d0))
-    (objc:invoke text "setAutoresizingMask:" +flexible-width+)
-    (objc:invoke text "setVerticallyResizable:" t)
-    (objc:invoke text "setTextContainerInset:" #(2d0 4d0))
+        (table (objc:invoke (objc:invoke "NSTableView" "alloc") "initWithFrame:"
+                            (vector 0d0 0d0 (aref frame 2) (aref frame 3))))
+        (font (objc:invoke "NSFont" "systemFontOfSize:" 11d0)))
+    (objc:invoke table "setStyle:" +ns-table-view-style-full-width+)
+    (objc:invoke table "setRowHeight:" 16d0)
+    (loop for (key title width resizing) in '(("time" "Time" 136d0 2)
+                                              ("user" "User" 90d0 2)
+                                              ("address" "IP Address" 116d0 2)
+                                              ;; The message has what is left.
+                                              ("message" "Message" 280d0 3))
+          do (let ((column (add-column table key title width
+                                       :resizing resizing :sortable t)))
+               (objc:invoke (objc:invoke column "dataCell") "setFont:" font)
+               ;; A message too long for its column ends in an ellipsis.
+               (objc:invoke (objc:invoke column "dataCell") "setLineBreakMode:" 4)))
+    (objc:invoke table "setUsesAlternatingRowBackgroundColors:" t)
+    (objc:invoke table "setAllowsMultipleSelection:" nil)
+    (objc:invoke table "setColumnAutoresizingStyle:" 1)
+    (objc:invoke table "setDataSource:" target)
+    (objc:invoke table "setDelegate:" target)
     (objc:invoke scroll "setHasVerticalScroller:" t)
     (objc:invoke scroll "setAutohidesScrollers:" t)
     (objc:invoke scroll "setBorderType:" +ns-bezel-border+)
     (objc:invoke scroll "setAutoresizingMask:" mask)
-    (objc:invoke scroll "setDocumentView:" text)
+    (objc:invoke scroll "setDocumentView:" table)
     (objc:invoke content "addSubview:" scroll)
-    (objc:release text)
+    (objc:invoke table "sizeToFit")
+    (objc:release table)
     (objc:release scroll)
-    text))
+    table))
 
 (defun make-window-controller (model)
   "A controller for MODEL with its window built and not yet shown.
@@ -459,7 +528,7 @@ is what grows when the window does."
     ;; Or the close button frees a window this still points at.
     (objc:invoke window "setReleasedWhenClosed:" nil)
     (objc:invoke window "setTitle:" "FTP Server")
-    (objc:invoke window "setContentMinSize:" #(480d0 560d0))
+    (objc:invoke window "setContentMinSize:" #(560d0 600d0))
     (setf (controller-window controller) window)
     (flet ((labelled-field (label class width)
              (add-label content label (vector 20d0 (+ y 3d0) 100d0 17d0) top)
@@ -488,14 +557,19 @@ is what grows when the window does."
 
     ;; From the bottom up.
     (setf (controller-status-label controller)
-          (add-label content "" (vector 20d0 22d0 410d0 17d0)
+          (add-label content "" (vector 20d0 22d0 (- +window-width+ 150d0) 17d0)
                      (logior +flexible-width+ bottom))
           (controller-start-button controller)
-          (add-button content "Start" "toggleServer:" #(436d0 14d0 110d0 32d0)
+          (add-button content "Start" "toggleServer:"
+                      (vector (- +window-width+ 124d0) 14d0 110d0 32d0)
                       (logior +flexible-left+ bottom) target)
-          (controller-activity-view controller)
-          (add-activity-view content (vector 20d0 56d0 wide +activity-height+)
-                             (logior +flexible-width+ bottom)))
+          (controller-activity-table controller)
+          (add-activity-table content (vector 20d0 56d0 wide +activity-height+)
+                              (logior +flexible-width+ bottom) target))
+    ;; Oldest first, to begin with, and the header says so with its arrow.
+    (objc:invoke (controller-activity-table controller) "setSortDescriptors:"
+                 (vector (objc:invoke "NSSortDescriptor" "sortDescriptorWithKey:ascending:"
+                                      "time" t)))
     (let ((above-activity (+ 56d0 +activity-height+)))
       (add-label content "Activity:" (vector 20d0 (+ above-activity 6d0) 300d0 17d0) bottom)
       (add-button content "Add…" "addMapping:"

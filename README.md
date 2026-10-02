@@ -56,10 +56,13 @@ certificate. Put that in `local.mk`, which is not committed.
   folder. Folders can be added, removed and changed while the server runs, and
   clients see the change on their next command.
 
-- **Activity.** What each connected client is doing: who logged in and from
-  where, what they opened, listed, downloaded and uploaded and how large it
-  was, what they deleted or renamed, and what they were refused. Passwords are
-  never shown. The same lines go to the log.
+- **Activity.** A table of what each connected client is doing, with a row for
+  each thing: the time, the user (`anon` until someone has logged in), the IP
+  address, and a message saying what they opened, listed, downloaded or
+  uploaded and how large it was, what they deleted or renamed, and what they
+  were refused. Click a column's header to sort by it, and again to reverse;
+  addresses sort by number. Passwords are never shown. The same lines go to
+  the log.
 
 The other settings are fixed while the server runs: stop it to change them.
 
