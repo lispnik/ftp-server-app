@@ -18,6 +18,7 @@ make deps    # restore the dependencies ocicl.csv pins, into ./ocicl/
 make test    # the FiveAM suite
 make app     # build/FTP Server.app
 make run     # run from source, unbundled
+make icon    # draw res/icon.png again
 ```
 
 Use an SBCL built `--with-sb-safepoint`: the bundle ships the runtime of
@@ -130,6 +131,11 @@ src/                 the server; no Objective-C, depends only on SBCL's contribs
 src/macos/           the window, the Bonjour announcement, the application
 tests/               FiveAM; ui-tests drive the real window without showing it
 ```
+
+## The icon
+
+`res/icon.png` is drawn by `tools/icon.lisp`, with the same Objective-C
+bindings the application uses; `make icon` draws it again after a change.
 
 ## Checking the bundle from a script
 

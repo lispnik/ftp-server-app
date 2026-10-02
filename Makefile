@@ -4,6 +4,7 @@
 #   make test    run the FiveAM suite
 #   make run     run the application from source, unbundled
 #   make app     build "build/FTP Server.app"
+#   make icon    draw res/icon.png again, from tools/icon.lisp
 #   make clean   remove the bundle and the fasls
 #
 # Build with a safepoint SBCL: asdf-macos-app ships the runtime of whichever
@@ -31,7 +32,7 @@ REGISTRY = (asdf:initialize-source-registry \
 LISP = $(SBCL) --non-interactive --no-userinit --no-sysinit \
          --eval '(require :asdf)' --eval '$(REGISTRY)'
 
-.PHONY: deps test run app clean
+.PHONY: deps test run app icon clean
 
 deps:
 	ocicl install
@@ -46,6 +47,13 @@ run:
 
 app:
 	$(LISP) --eval '(asdf:make "ftp-server-app")'
+
+# The icon is drawn by a program, with the same bindings the application uses.
+# Its PNG is checked in, so this is only for when tools/icon.lisp changes.
+icon:
+	$(LISP) --eval '(asdf:load-system "objc")' \
+	        --load tools/icon.lisp \
+	        --eval '(ftp-server-icon:main)'
 
 clean:
 	rm -rf build

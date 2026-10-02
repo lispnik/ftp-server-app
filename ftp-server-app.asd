@@ -15,6 +15,8 @@
   :bundle-identifier "org.lispnik.ftp-server"
   :bundle-name "FTP Server"
   :bundle-executable "ftp-server"
+  ;; Drawn by tools/icon.lisp; asdf-macos-app makes the .icns from the PNG.
+  :bundle-icon "res/icon.png"
   :bundle-principal-class "NSApplication"
   :bundle-category "public.app-category.utilities"
   :bundle-copyright "MIT"
