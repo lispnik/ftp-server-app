@@ -132,6 +132,9 @@ it while it lasts."
               (seconds (self-test-seconds)))
           (show-window controller)
           (note "ready")
+          (when (and (model-start-at-launch (controller-model controller))
+                     (not seconds))
+            (controller-start controller))
           (when seconds
             (note "self test: ~:[did not start~;started~], quitting in ~d seconds"
                   (controller-start controller) seconds)

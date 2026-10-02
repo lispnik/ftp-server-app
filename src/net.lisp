@@ -9,14 +9,38 @@
 (defparameter *poll-interval* 0.25
   "How long a blocked accept goes without looking at its stop flag, in seconds.")
 
+(defconstant +ipproto-ipv6+ 41)
+(defconstant +ipv6-v6only+ #+darwin 27 #-darwin 26)
+
+(defun ipv6-address-p (address)
+  (= 16 (length address)))
+
+(defun set-ipv6-only (socket)
+  "Keep an IPv6 socket to IPv6.  Without this it also takes IPv4 connections,
+as addresses of a form nothing else here expects, and it collides with the
+IPv4 socket listening on the same port."
+  (sb-alien:with-alien ((one sb-alien:int 1))
+    (sb-alien:alien-funcall
+     (sb-alien:extern-alien "setsockopt"
+                            (function sb-alien:int sb-alien:int sb-alien:int sb-alien:int
+                                      (* sb-alien:int) sb-alien:unsigned-int))
+     (sb-bsd-sockets:socket-file-descriptor socket)
+     +ipproto-ipv6+ +ipv6-v6only+ (sb-alien:addr one) 4)))
+
 (defun listen-on (address port &key (backlog 16))
-  "A socket listening on ADDRESS, a vector of four octets, and PORT.  Port 0
-asks for any free port; SOCKET-PORT says which was given."
-  (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
+  "A socket listening on ADDRESS and PORT.  ADDRESS is a vector of four octets
+for IPv4 or of sixteen for IPv6.  Port 0 asks for any free port; SOCKET-PORT
+says which was given."
+  (let ((socket (make-instance (if (ipv6-address-p address)
+                                   'sb-bsd-sockets:inet6-socket
+                                   'sb-bsd-sockets:inet-socket)
+                               :type :stream :protocol :tcp))
         (done nil))
     (unwind-protect
          (progn
            (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
+           (when (ipv6-address-p address)
+             (set-ipv6-only socket))
            (sb-bsd-sockets:socket-bind socket address port)
            (sb-bsd-sockets:socket-listen socket backlog)
            (setf done t)
@@ -29,15 +53,40 @@ asks for any free port; SOCKET-PORT says which was given."
   (nth-value 1 (sb-bsd-sockets:socket-name socket)))
 
 (defun local-address (socket)
-  "The local address of SOCKET, a vector of four octets."
+  "The local address of SOCKET, a vector of four octets or of sixteen."
   (values (sb-bsd-sockets:socket-name socket)))
 
 (defun peer-address (socket)
   "The address at the far end of SOCKET, or NIL if it has gone."
   (ignore-errors (values (sb-bsd-sockets:socket-peername socket))))
 
+(defun ipv6-address-string (address)
+  "ADDRESS as IPv6 is written: groups of hex, with the longest run of zero
+groups, if it is two or more, written as ::."
+  (let* ((groups (loop for index below 16 by 2
+                       collect (+ (ash (aref address index) 8) (aref address (1+ index)))))
+         (best-start nil)
+         (best-length 1))
+    (loop with index = 0
+          while (< index 8)
+          do (if (zerop (nth index groups))
+                 (let ((end (or (position-if-not #'zerop groups :start index) 8)))
+                   (when (> (- end index) best-length)
+                     (setf best-start index
+                           best-length (- end index)))
+                   (setf index end))
+                 (incf index)))
+    (if best-start
+        (format nil "~{~(~x~)~^:~}::~{~(~x~)~^:~}"
+                (subseq groups 0 best-start)
+                (subseq groups (+ best-start best-length)))
+        (format nil "~{~(~x~)~^:~}" groups))))
+
 (defun address-string (address)
-  (format nil "~{~d~^.~}" (coerce address 'list)))
+  "ADDRESS as it is written, IPv4 or IPv6."
+  (if (ipv6-address-p address)
+      (ipv6-address-string address)
+      (format nil "~{~d~^.~}" (coerce address 'list))))
 
 (defun accept-with-timeout (socket seconds stop-p)
   "The next connection to SOCKET, or NIL after SECONDS or once STOP-P answers

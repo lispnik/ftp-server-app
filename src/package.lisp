@@ -19,7 +19,7 @@
    #:settings-file #:load-settings #:save-settings
    #:model #:make-model #:model-vfs
    #:model-username #:model-password #:model-port #:model-allow-remote
-   #:model-bonjour-name #:model-running-p #:model-advertise-p
+   #:model-bonjour-name #:model-start-at-launch #:model-running-p #:model-advertise-p
    #:model-add-directory #:model-remove-mapping #:model-rename-mapping
    #:model-set-writable #:model-start #:model-stop #:model-status-text
    #:parse-port

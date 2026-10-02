@@ -13,18 +13,27 @@
 
 (defparameter *loopback* #(127 0 0 1))
 (defparameter *any-address* #(0 0 0 0))
+(defparameter *loopback6* #(0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1))
+(defparameter *any-address6* #(0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0))
+
+(defparameter *loopback-addresses* (list *loopback* *loopback6*)
+  "This computer only, over IPv4 and IPv6.")
+(defparameter *any-addresses* (list *any-address* *any-address6*)
+  "Every interface, over IPv4 and IPv6.")
 
 (defclass server ()
   ((vfs :initarg :vfs :reader server-vfs)
    (authenticator :initarg :authenticator :reader server-authenticator
                   :documentation "A function of a user name and a password.")
-   (address :initarg :address :reader server-address)
+   (addresses :initarg :addresses :reader server-addresses
+              :documentation "What to listen on.  The first has to work; the
+rest are listened on if they can be.")
    (requested-port :initarg :port :reader server-requested-port)
    (port :initform nil :accessor server-port
          :documentation "The port being listened on, once started.")
    (on-event :initarg :on-event :reader server-on-event)
-   (listener :initform nil :accessor server-listener)
-   (accept-thread :initform nil :accessor server-accept-thread)
+   (listeners :initform '() :accessor server-listeners)
+   (accept-threads :initform '() :accessor server-accept-threads)
    (stopping :initform nil :accessor server-stopping-p)
    (running :initform nil :accessor server-running-p)
    (sessions :initform '() :accessor server-sessions)
@@ -32,7 +41,8 @@
    (lock :initform (sb-thread:make-mutex :name "ftp-server sessions")
          :reader server-lock)))
 
-(defun make-server (&key vfs authenticator (address *loopback*) (port 2121) on-event)
+(defun make-server (&key vfs authenticator (addresses *loopback-addresses*) (port 2121)
+                      on-event)
   "A server that is not yet listening.
 
 ON-EVENT, if given, is called on the server's threads with a keyword and its
@@ -40,9 +50,10 @@ arguments:
 
   :STARTED port                 :STOPPED
   :CLIENT-CONNECTED address     :CLIENT-DISCONNECTED address
-  :LOG string"
+  :ACTIVITY user address text   what a client did, in words
+  :LOG string                   something that went wrong"
   (make-instance 'server :vfs vfs :authenticator authenticator
-                         :address address :port port :on-event on-event))
+                         :addresses addresses :port port :on-event on-event))
 
 (defun server-emit (server event &rest arguments)
   (let ((function (server-on-event server)))
@@ -94,8 +105,8 @@ built with the debugger disabled, where an unhandled error ends the process."
         (setf (server-threads server)
               (remove sb-thread:*current-thread* (server-threads server)))))))
 
-(defun accept-loop (server)
-  (let ((listener (server-listener server)))
+(defun accept-loop (server listener)
+  (progn
     (unwind-protect
          (guarding-thread (server "accept")
            (loop
@@ -116,14 +127,29 @@ built with the debugger disabled, where an unhandled error ends the process."
 a port already in use is the caller's error to report."
   (when (server-running-p server)
     (error "The server is already running."))
-  (let ((listener (listen-on (server-address server) (server-requested-port server))))
-    (setf (server-listener server) listener
-          (server-port server) (socket-port listener)
+  (let* ((addresses (server-addresses server))
+         (first (listen-on (first addresses) (server-requested-port server)))
+         (port (socket-port first))
+         ;; The same port on each of the others.  One that cannot be had -- a
+         ;; machine with no IPv6, say -- is done without.
+         (listeners (cons first
+                          (loop for address in (rest addresses)
+                                for listener = (handler-case (listen-on address port)
+                                                 (error (condition)
+                                                   (server-log server
+                                                               "not listening on ~a: ~a"
+                                                               (address-string address)
+                                                               condition)
+                                                   nil))
+                                when listener collect listener))))
+    (setf (server-listeners server) listeners
+          (server-port server) port
           (server-stopping-p server) nil
           (server-running-p server) t
-          (server-accept-thread server)
-          (sb-thread:make-thread #'accept-loop :name "ftp-server accept"
-                                               :arguments (list server))))
+          (server-accept-threads server)
+          (loop for listener in listeners
+                collect (sb-thread:make-thread #'accept-loop :name "ftp-server accept"
+                                                             :arguments (list server listener)))))
   (server-emit server :started (server-port server))
   server)
 
@@ -139,16 +165,16 @@ finish on its own: its sockets are already shut down."
         (session-interrupt session)))
     (let ((deadline (+ (get-internal-real-time)
                        (* timeout internal-time-units-per-second)))
-          (threads (cons (server-accept-thread server)
-                         (sb-thread:with-mutex ((server-lock server))
-                           (copy-list (server-threads server))))))
+          (threads (append (server-accept-threads server)
+                           (sb-thread:with-mutex ((server-lock server))
+                             (copy-list (server-threads server))))))
       (dolist (thread threads)
         (let ((remaining (/ (- deadline (get-internal-real-time))
                             internal-time-units-per-second)))
           (sb-thread:join-thread thread :default nil
                                         :timeout (max 0.01 (float remaining))))))
     (setf (server-running-p server) nil
-          (server-accept-thread server) nil
-          (server-listener server) nil)
+          (server-accept-threads server) '()
+          (server-listeners server) '())
     (server-emit server :stopped))
   server)

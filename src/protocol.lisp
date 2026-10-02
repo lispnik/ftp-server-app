@@ -21,7 +21,10 @@
    (user :initform nil :accessor session-user)
    (cwd :initform '() :accessor session-cwd)
    (rename-from :initform nil :accessor session-rename-from
-                :documentation "After RNFR: a list of the mapping and host path.")
+                :documentation "After RNFR: a list of the mapping, the host
+path, and the path as the client knows it.")
+   (transferred :initform 0 :accessor session-transferred
+                :documentation "Octets of the file the last transfer moved.")
    (rest-offset :initform 0 :accessor session-rest-offset)
    (transfer-type :initform :image :accessor session-transfer-type
                   :documentation ":IMAGE, where a file crosses as it is, or
@@ -155,15 +158,9 @@ and anything in a mapping that is not writable."
                   (session-user session) (or argument ""))
          (setf (session-state session) :logged-in
                (session-cwd session) '())
-         (server-log (session-server session) "~a logged in from ~a"
-                     (session-user session)
-                     (and (session-peer session) (address-string (session-peer session))))
          (values 230 "Logged in."))
         (t
          (setf (session-state session) :new)
-         (server-log (session-server session) "login refused for ~a from ~a"
-                     (session-user session)
-                     (and (session-peer session) (address-string (session-peer session))))
          (sleep *login-failure-delay*)
          (values 530 "Login incorrect."))))
 
@@ -330,10 +327,12 @@ and anything in a mapping that is not writable."
   (command-rmd session argument))
 
 (define-command "RNFR" (session argument)
-  (multiple-value-bind (mapping host-path) (resolve-for-change session argument)
+  (multiple-value-bind (mapping host-path components)
+      (resolve-for-change session argument)
     (unless (host-file-type host-path)
       (error 'vfs-not-found))
-    (setf (session-rename-from session) (list mapping host-path))
+    (setf (session-rename-from session)
+          (list mapping host-path (virtual-path-string components)))
     (values 350 "Ready for RNTO.")))
 
 (define-command "RNTO" (session argument)
@@ -347,3 +346,59 @@ and anything in a mapping that is not writable."
             (error 'vfs-error :message "Cannot rename from one mapped folder to another."))
           (sb-posix:rename (second from) host-path)
           (values 250 "Renamed.")))))
+
+;;; What a client did, in words -----------------------------------------------------
+;;;
+;;; For the window's activity pane.  Only what someone watching would want to
+;;; know is described: logging in, looking, fetching, changing, and being
+;;; refused any of those.  The housekeeping between -- TYPE, PASV, PWD -- is not.
+
+(defun size-string (octets)
+  "OCTETS as a person reads a size."
+  (cond ((< octets 1024) (format nil "~d byte~:p" octets))
+        ((< octets (* 1024 1024)) (format nil "~,1f KB" (/ octets 1024.0)))
+        ((< octets (* 1024 1024 1024)) (format nil "~,1f MB" (/ octets 1024.0 1024.0)))
+        (t (format nil "~,2f GB" (/ octets 1024.0 1024.0 1024.0)))))
+
+(defparameter *activity-phrases*
+  '(("CWD" . "open") ("XCWD" . "open") ("CDUP" . "open") ("XCUP" . "open")
+    ("LIST" . "list") ("NLST" . "list") ("MLSD" . "list")
+    ("RETR" . "download") ("STOR" . "upload") ("APPE" . "append to")
+    ("DELE" . "delete") ("MKD" . "create folder") ("XMKD" . "create folder")
+    ("RMD" . "remove folder") ("XRMD" . "remove folder")
+    ("RNFR" . "rename") ("RNTO" . "rename to"))
+  "The commands worth describing, each with what it was an attempt to do.")
+
+(defun describe-activity (verb path code text &key size from)
+  "A sentence for what the command VERB did to PATH, given the reply CODE and
+TEXT, or NIL if it is not worth one.  SIZE is the octets a transfer moved and
+FROM the path a rename started at."
+  (let ((phrase (cdr (assoc verb *activity-phrases* :test #'string=)))
+        (text (if (listp text) (first text) text)))
+    (cond
+      ((string= verb "PASS")
+       (if (= code 230) "logged in" "was refused: wrong user name or password"))
+      ((null phrase) nil)
+      ;; A transfer that began and did not finish.
+      ((and (= code 426) (member verb '("RETR" "STOR" "APPE") :test #'string=))
+       (format nil "~a of ~a was interrupted after ~a"
+               (if (string= verb "RETR") "download" "upload")
+               path (size-string (or size 0))))
+      ((>= code 400)
+       (format nil "could not ~a ~a: ~a" phrase path (string-right-trim "." text)))
+      ((member verb '("CWD" "XCWD" "CDUP" "XCUP") :test #'string=)
+       (format nil "opened ~a" path))
+      ((member verb '("LIST" "NLST" "MLSD") :test #'string=)
+       (format nil "listed ~a" path))
+      ((string= verb "RETR")
+       (format nil "downloaded ~a (~a)" path (size-string (or size 0))))
+      ((string= verb "STOR")
+       (format nil "uploaded ~a (~a)" path (size-string (or size 0))))
+      ((string= verb "APPE")
+       (format nil "appended to ~a (~a)" path (size-string (or size 0))))
+      ((string= verb "DELE") (format nil "deleted ~a" path))
+      ((member verb '("MKD" "XMKD") :test #'string=) (format nil "created folder ~a" path))
+      ((member verb '("RMD" "XRMD") :test #'string=) (format nil "removed folder ~a" path))
+      ((string= verb "RNTO") (format nil "renamed ~a to ~a" (or from "?") path))
+      ;; RNFR alone is half of something; RNTO says the whole.
+      (t nil))))

@@ -45,12 +45,22 @@ certificate. Put that in `local.mk`, which is not committed.
   Bonjour.
 - **Bonjour name.** The name the server is announced under; empty means this
   computer's name.
+- **Start serving when FTP Server opens.** Starts the server as soon as the
+  window is up.
 - **Shared folders.** Add… chooses folders; double-click a name to change it;
   tick Writable to allow uploads, deletes, renames and new directories in that
   folder. Folders can be added, removed and changed while the server runs, and
   clients see the change on their next command.
 
+- **Activity.** What each connected client is doing: who logged in and from
+  where, what they opened, listed, downloaded and uploaded and how large it
+  was, what they deleted or renamed, and what they were refused. Passwords are
+  never shown. The same lines go to the log.
+
 The other settings are fixed while the server runs: stop it to change them.
+
+The server listens on IPv4 and IPv6. Over IPv6 a client has to use `EPSV`,
+which every current client does; `PASV` has no room for the address.
 
 ```sh
 curl --user name:password ftp://127.0.0.1:2121/

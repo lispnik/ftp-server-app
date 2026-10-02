@@ -20,6 +20,7 @@
   (with-temporary-directory (directory)
     (let ((settings (list :version 1 :username "ann" :password "p \"q\" \\ r"
                           :port 2200 :allow-remote t :bonjour-name "Files"
+                          :start-at-launch t
                           :mappings (list (list :name "tempdir" :path "/tmp" :writable nil)
                                           (list :name "in" :path "/a b/[c]" :writable t))))
           (file (settings-path directory)))

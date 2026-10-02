@@ -15,6 +15,10 @@
    (port-field :initform nil :accessor controller-port-field)
    (bonjour-field :initform nil :accessor controller-bonjour-field)
    (remote-checkbox :initform nil :accessor controller-remote-checkbox)
+   (launch-checkbox :initform nil :accessor controller-launch-checkbox)
+   (activity-view :initform nil :accessor controller-activity-view)
+   (activity :initform '() :accessor controller-activity
+             :documentation "The lines of the activity pane, newest first.")
    (remove-button :initform nil :accessor controller-remove-button)
    (start-button :initform nil :accessor controller-start-button)
    (status-label :initform nil :accessor controller-status-label)
@@ -80,6 +84,8 @@ may log in are fixed while it runs; the folders are not."
                  (model-bonjour-name model))
     (objc:invoke (controller-remote-checkbox controller) "setState:"
                  (if (model-allow-remote model) 1 0))
+    (objc:invoke (controller-launch-checkbox controller) "setState:"
+                 (if (model-start-at-launch model) 1 0))
     (objc:invoke (controller-table controller) "reloadData")
     (refresh-controls controller)))
 
@@ -93,7 +99,9 @@ not one; the other fields are taken as they are."
           (model-bonjour-name model)
           (string-trim " " (field-string (controller-bonjour-field controller)))
           (model-allow-remote model)
-          (= 1 (objc:invoke (controller-remote-checkbox controller) "state")))
+          (= 1 (objc:invoke (controller-remote-checkbox controller) "state"))
+          (model-start-at-launch model)
+          (= 1 (objc:invoke (controller-launch-checkbox controller) "state")))
     (cond (port
            (setf (model-port model) port)
            (values t nil))
@@ -113,12 +121,51 @@ not one; the other fields are taken as they are."
 
 ;;; Starting and stopping -------------------------------------------------------------
 
+(defparameter *activity-limit* 500
+  "How many lines the activity pane keeps.")
+
+(defun controller-add-activity (controller who text)
+  "Add a line to the activity pane, and to the log: the time, WHO did it if
+anyone, and TEXT."
+  (multiple-value-bind (second minute hour) (get-decoded-time)
+    (let ((line (format nil "~2,'0d:~2,'0d:~2,'0d  ~@[~a  ~]~a" hour minute second who text))
+          (view (controller-activity-view controller)))
+      (note "~@[~a  ~]~a" who text)
+      (push line (controller-activity controller))
+      (when (> (length (controller-activity controller)) *activity-limit*)
+        (setf (controller-activity controller)
+              (subseq (controller-activity controller) 0 *activity-limit*)))
+      (objc:invoke view "setString:"
+                   (format nil "~{~a~^~%~}" (reverse (controller-activity controller))))
+      ;; Keep the newest line in view.
+      (objc:invoke view "scrollRangeToVisible:"
+                   (cons (objc:invoke (objc:invoke view "string") "length") 0))
+      line)))
+
+(defun client-name (user address)
+  "Who a line of activity is about: the user, once there is one, and where
+they are connecting from."
+  (format nil "~@[~a@~]~a"
+          (and user (plusp (length user)) user)
+          (if address (address-string address) "?")))
+
 (defun controller-server-event (controller event arguments)
   "On the main thread, for something a server thread said."
-  (when (eq event :log)
-    (note "~a" (first arguments)))
-  (when (member event '(:client-connected :client-disconnected))
-    (note "~(~a~) ~a" event (and (first arguments) (address-string (first arguments)))))
+  (ecase event
+    (:activity
+     (destructuring-bind (user address text) arguments
+       (controller-add-activity controller (client-name user address) text)))
+    (:client-connected
+     (controller-add-activity controller (client-name nil (first arguments)) "connected"))
+    (:client-disconnected
+     (controller-add-activity controller (client-name nil (first arguments)) "disconnected"))
+    (:started
+     (controller-add-activity controller nil
+                              (format nil "server started on port ~d" (first arguments))))
+    (:stopped
+     (controller-add-activity controller nil "server stopped"))
+    (:log
+     (controller-add-activity controller nil (first arguments))))
   (refresh-controls controller))
 
 (defun controller-start (controller)
@@ -134,7 +181,6 @@ not one; the other fields are taken as they are."
                                       (controller-server-event controller event
                                                                arguments)))))))
       (when ok
-        (note "started on port ~d" (server-port (model-server model)))
         (when (model-advertise-p model)
           (handler-case
               (bonjour-publish (server-port (model-server model))
@@ -145,8 +191,7 @@ not one; the other fields are taken as they are."
 
 (defun controller-stop (controller)
   (bonjour-unpublish)
-  (when (model-stop (controller-model controller))
-    (note "stopped"))
+  (model-stop (controller-model controller))
   (controller-changed controller))
 
 (define-controller-method ("toggleServer:" :void) ((sender objc:objc-object-pointer))
@@ -342,10 +387,47 @@ not one; the other fields are taken as they are."
     table))
 
 (defparameter +window-width+ 560d0)
-(defparameter +window-height+ 490d0)
+(defparameter +window-height+ 680d0)
+(defparameter +activity-height+ 120d0)
+
+(defun add-checkbox (content title frame mask target)
+  (let ((checkbox (objc:invoke "NSButton" "checkboxWithTitle:target:action:"
+                               title target (objc:coerce-to-selector "settingsChanged:"))))
+    (objc:invoke checkbox "setFrame:" frame)
+    (objc:invoke checkbox "setAutoresizingMask:" mask)
+    (objc:invoke content "addSubview:" checkbox)
+    checkbox))
+
+(defun add-activity-view (content frame mask)
+  "The activity pane: text that cannot be edited, in a scroll view.  Answers
+the text view."
+  (let ((scroll (objc:invoke (objc:invoke "NSScrollView" "alloc") "initWithFrame:" frame))
+        (text (objc:invoke (objc:invoke "NSTextView" "alloc") "initWithFrame:"
+                           (vector 0d0 0d0 (aref frame 2) (aref frame 3)))))
+    (objc:invoke text "setEditable:" nil)
+    (objc:invoke text "setSelectable:" t)
+    (objc:invoke text "setRichText:" nil)
+    (objc:invoke text "setFont:"
+                 (objc:invoke "NSFont" "monospacedSystemFontOfSize:weight:" 11d0 0d0))
+    (objc:invoke text "setAutoresizingMask:" +flexible-width+)
+    (objc:invoke text "setVerticallyResizable:" t)
+    (objc:invoke text "setTextContainerInset:" #(2d0 4d0))
+    (objc:invoke scroll "setHasVerticalScroller:" t)
+    (objc:invoke scroll "setAutohidesScrollers:" t)
+    (objc:invoke scroll "setBorderType:" +ns-bezel-border+)
+    (objc:invoke scroll "setAutoresizingMask:" mask)
+    (objc:invoke scroll "setDocumentView:" text)
+    (objc:invoke content "addSubview:" scroll)
+    (objc:release text)
+    (objc:release scroll)
+    text))
 
 (defun make-window-controller (model)
-  "A controller for MODEL with its window built and not yet shown."
+  "A controller for MODEL with its window built and not yet shown.
+
+Laid out from both ends: the settings hang from the top, the activity pane and
+the Start button stand on the bottom, and the table has what is between, which
+is what grows when the window does."
   (let* ((controller (make-instance 'window-controller :model model))
          (target (objc:objc-object-pointer controller))
          (window (objc:invoke (objc:invoke "NSWindow" "alloc")
@@ -355,50 +437,61 @@ not one; the other fields are taken as they are."
          (content (objc:invoke window "contentView"))
          ;; Pinned to the top, to the bottom, and stretching between.
          (top +flexible-bottom+)
-         (bottom +flexible-top+))
+         (bottom +flexible-top+)
+         (wide (- +window-width+ 40d0))
+         ;; Where the next row of settings goes.
+         (y (- +window-height+ 42d0)))
     ;; Or the close button frees a window this still points at.
     (objc:invoke window "setReleasedWhenClosed:" nil)
     (objc:invoke window "setTitle:" "FTP Server")
-    (objc:invoke window "setContentMinSize:" #(480d0 380d0))
+    (objc:invoke window "setContentMinSize:" #(480d0 560d0))
     (setf (controller-window controller) window)
+    (flet ((labelled-field (label class width)
+             (add-label content label (vector 20d0 (+ y 3d0) 100d0 17d0) top)
+             (prog1 (add-field content class (vector 126d0 y width 22d0) top target)
+               (decf y 30d0)))
+           (checkbox (title)
+             (prog1 (add-checkbox content title (vector 126d0 (+ y 4d0) 400d0 18d0)
+                                  top target)
+               (decf y 24d0))))
+      (setf (controller-username-field controller)
+            (labelled-field "User name:" "NSTextField" 200d0)
+            (controller-password-field controller)
+            (labelled-field "Password:" "NSSecureTextField" 200d0)
+            (controller-port-field controller)
+            (labelled-field "Port:" "NSTextField" 70d0)
+            (controller-bonjour-field controller)
+            (labelled-field "Bonjour name:" "NSTextField" 200d0))
+      (objc:invoke (controller-bonjour-field controller) "setPlaceholderString:"
+                   "This computer’s name")
+      (setf (controller-remote-checkbox controller)
+            (checkbox "Allow connections from other computers")
+            (controller-launch-checkbox controller)
+            (checkbox "Start serving when FTP Server opens")))
 
-    (add-label content "User name:" #(20d0 448d0 100d0 17d0) top)
-    (setf (controller-username-field controller)
-          (add-field content "NSTextField" #(126d0 445d0 200d0 22d0) top target))
-    (add-label content "Password:" #(20d0 418d0 100d0 17d0) top)
-    (setf (controller-password-field controller)
-          (add-field content "NSSecureTextField" #(126d0 415d0 200d0 22d0) top target))
-    (add-label content "Port:" #(20d0 388d0 100d0 17d0) top)
-    (setf (controller-port-field controller)
-          (add-field content "NSTextField" #(126d0 385d0 70d0 22d0) top target))
-    (let ((checkbox (objc:invoke "NSButton" "checkboxWithTitle:target:action:"
-                                 "Allow connections from other computers"
-                                 target (objc:coerce-to-selector "settingsChanged:"))))
-      (objc:invoke checkbox "setFrame:" #(210d0 386d0 330d0 18d0))
-      (objc:invoke checkbox "setAutoresizingMask:" top)
-      (objc:invoke content "addSubview:" checkbox)
-      (setf (controller-remote-checkbox controller) checkbox))
-    (add-label content "Bonjour name:" #(20d0 358d0 100d0 17d0) top)
-    (let ((field (add-field content "NSTextField" #(126d0 355d0 200d0 22d0) top target)))
-      (objc:invoke field "setPlaceholderString:" "This computer’s name")
-      (setf (controller-bonjour-field controller) field))
-
-    (add-label content "Shared folders:" #(20d0 326d0 300d0 17d0) top)
-    (setf (controller-table controller)
-          (add-table content #(20d0 96d0 520d0 224d0)
-                     (logior +flexible-width+ +flexible-height+) target))
-
-    (add-button content "Add…" "addMapping:" #(14d0 56d0 90d0 32d0) bottom target)
-    (setf (controller-remove-button controller)
-          (add-button content "Remove" "removeMapping:" #(106d0 56d0 90d0 32d0)
-                      bottom target))
-
+    ;; From the bottom up.
     (setf (controller-status-label controller)
-          (add-label content "" #(20d0 22d0 410d0 17d0)
-                     (logior +flexible-width+ bottom)))
-    (setf (controller-start-button controller)
+          (add-label content "" (vector 20d0 22d0 410d0 17d0)
+                     (logior +flexible-width+ bottom))
+          (controller-start-button controller)
           (add-button content "Start" "toggleServer:" #(436d0 14d0 110d0 32d0)
-                      (logior +flexible-left+ bottom) target))
+                      (logior +flexible-left+ bottom) target)
+          (controller-activity-view controller)
+          (add-activity-view content (vector 20d0 56d0 wide +activity-height+)
+                             (logior +flexible-width+ bottom)))
+    (let ((above-activity (+ 56d0 +activity-height+)))
+      (add-label content "Activity:" (vector 20d0 (+ above-activity 6d0) 300d0 17d0) bottom)
+      (add-button content "Add…" "addMapping:"
+                  (vector 14d0 (+ above-activity 28d0) 90d0 32d0) bottom target)
+      (setf (controller-remove-button controller)
+            (add-button content "Remove" "removeMapping:"
+                        (vector 106d0 (+ above-activity 28d0) 90d0 32d0) bottom target))
+      ;; And the table between the two.
+      (let ((table-bottom (+ above-activity 68d0)))
+        (add-label content "Shared folders:" (vector 20d0 (- y 2d0) 300d0 17d0) top)
+        (setf (controller-table controller)
+              (add-table content (vector 20d0 table-bottom wide (- y 8d0 table-bottom))
+                         (logior +flexible-width+ +flexible-height+) target))))
 
     (objc:invoke window "center")
     (show-model controller)

@@ -70,6 +70,10 @@
 (defun status (controller)
   (objc:invoke-into 'string (fs::controller-status-label controller) "stringValue"))
 
+(defun activity-text (controller)
+  "What the activity pane shows, asked of the text view itself."
+  (objc:invoke-into 'string (fs::controller-activity-view controller) "string"))
+
 (defun title (button)
   (objc:invoke-into 'string button "title"))
 
@@ -183,7 +187,16 @@
         (is-true (wait-until
                   (lambda ()
                     (objc.runloop:pump-run-loop :seconds 0.01d0)
-                    (search "1 client " (status controller))))))
+                    (search "1 client " (status controller)))))
+        ;; And what it did reaches the activity pane, by the same road.
+        (is-true (wait-until
+                  (lambda ()
+                    (objc.runloop:pump-run-loop :seconds 0.01d0)
+                    (search "listed /" (activity-text controller)))))
+        (is (search "ann@127.0.0.1  logged in" (activity-text controller)))
+        (is (search "127.0.0.1  connected" (activity-text controller)))
+        (is (search "server started on port" (activity-text controller)))
+        (is (null (search "pw" (activity-text controller)))))
       (objc:invoke button "performClick:" (cffi:null-pointer))
       (is-false (fs:model-running-p (fs::controller-model controller)))
       (is (string= "Start" (title button)))
@@ -207,3 +220,28 @@
     (fs::controller-stop controller)
     (is (null fs::*bonjour-status*))
     (is (null fs::*bonjour-service*))))
+
+(test the-activity-pane-keeps-only-so-many-lines
+  (with-controller (controller)
+    (let ((limit fs::*activity-limit*))
+      (setf fs::*activity-limit* 5)
+      (unwind-protect
+           (progn
+             (dotimes (index 12)
+               (fs::controller-add-activity controller "ann@127.0.0.1"
+                                            (format nil "did thing ~d" index)))
+             (let ((lines (uiop:split-string (activity-text controller)
+                                             :separator '(#\Newline))))
+               (is (= 5 (length lines)))
+               (is (search "did thing 7" (first lines)))
+               (is (search "did thing 11" (fifth lines)))))
+        (setf fs::*activity-limit* limit)))))
+
+(test starting-at-launch-is-a-setting-like-the-others
+  (with-controller (controller directory)
+    (is (= 0 (objc:invoke (fs::controller-launch-checkbox controller) "state")))
+    (objc:invoke (fs::controller-launch-checkbox controller) "performClick:" (cffi:null-pointer))
+    (is-true (fs:model-start-at-launch (fs::controller-model controller)))
+    (is (eq t (getf (fs:load-settings
+                     (sb-ext:parse-native-namestring (path directory "settings.lisp")))
+                    :start-at-launch)))))

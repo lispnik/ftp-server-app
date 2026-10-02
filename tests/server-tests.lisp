@@ -267,7 +267,7 @@ answering the events so far."
     (let ((kinds (mapcar #'first (funcall events))))
       (is (eq :started (first kinds)))
       (is (member :client-connected kinds))
-      (is (member :log kinds)))))
+      (is (member :activity kinds)))))
 
 (test stopping-ends-a-session-that-is-waiting
   (let* ((vfs (fs:make-vfs))
@@ -460,3 +460,137 @@ answering the events so far."
             (is (= (+ (length host) lines) (length wire)))
             (is (= 226 (store-octets client "STOR /m/copy.txt" wire)))
             (is (equalp host (read-octets (path directory "copy.txt"))))))))))
+
+;;; IPv6 ---------------------------------------------------------------------------
+
+(defun ipv6-available-p ()
+  (ignore-errors
+   (sb-bsd-sockets:socket-close (fs::listen-on fs::*loopback6* 0))
+   t))
+
+(defun open-client6 (port)
+  (let ((socket (make-instance 'sb-bsd-sockets:inet6-socket :type :stream :protocol :tcp)))
+    (sb-bsd-sockets:socket-connect socket fs::*loopback6* port)
+    (let ((client (make-client :socket socket
+                               :stream (fs::octet-stream socket :timeout 10))))
+      (assert (eql 220 (read-reply client)))
+      client)))
+
+(test addresses-are-written-as-they-are-read
+  (is (string= "127.0.0.1" (fs::address-string #(127 0 0 1))))
+  (is (string= "::1" (fs::address-string fs::*loopback6*)))
+  (is (string= "::" (fs::address-string fs::*any-address6*)))
+  (is (string= "fe80::1c2:3ff:fe04:506"
+               (fs::address-string #(#xfe #x80 0 0 0 0 0 0 1 #xc2 3 #xff #xfe 4 5 6))))
+  (is (string= "2001:db8::1"
+               (fs::address-string #(#x20 1 #xd #xb8 0 0 0 0 0 0 0 0 0 0 0 1))))
+  ;; One zero group alone is not worth a ::.
+  (is (string= "1:0:2:3:4:5:6:7"
+               (fs::address-string #(0 1 0 0 0 2 0 3 0 4 0 5 0 6 0 7)))))
+
+(test the-server-listens-on-ipv6-as-well
+  (if (not (ipv6-available-p))
+      (skip "no IPv6 on this machine")
+      (with-temporary-directory (directory)
+        (write-file (path directory "six.txt") "over six")
+        (let ((vfs (fs:make-vfs)))
+          (fs:vfs-add vfs "m" directory :writable t)
+          (with-server (server port vfs)
+            (let ((client (open-client6 port)))
+              (unwind-protect
+                   (progn
+                     (is (= 230 (login client)))
+                     ;; PASV has no room for the address; EPSV has no need of it.
+                     (is (= 522 (send client "PASV")))
+                     (multiple-value-bind (code lines) (send client "EPSV")
+                       (is (= 229 code))
+                       (let* ((line (first lines))
+                              (data-port (parse-integer
+                                          (string-trim "|" (subseq line (1+ (position #\( line))
+                                                                   (position #\) line)))))
+                              (socket (make-instance 'sb-bsd-sockets:inet6-socket
+                                                     :type :stream :protocol :tcp)))
+                         (sb-bsd-sockets:socket-connect socket fs::*loopback6* data-port)
+                         (unwind-protect
+                              (progn
+                                (is (= 150 (send client "RETR /m/six.txt")))
+                                (is (string= "over six"
+                                             (read-all (fs::octet-stream socket :timeout 10))))
+                                (is (= 226 (read-reply client))))
+                           (ignore-errors (sb-bsd-sockets:socket-close socket :abort t))))))
+                (close-client client)))
+            ;; And still on IPv4, on the same port.
+            (with-client (client port)
+              (is (= 230 (login client)))))))))
+
+;;; Activity -----------------------------------------------------------------------
+
+(defun activity (events)
+  "The sentences of the :ACTIVITY events in EVENTS, with who they were about."
+  (loop for (kind user address text) in events
+        when (eq kind :activity)
+          collect (list user text)))
+
+(test the-server-says-what-each-client-did
+  (with-temporary-directory (directory)
+    (write-file (path directory "hello.txt") "hello")
+    (let ((vfs (fs:make-vfs)))
+      (fs:vfs-add vfs "rw" directory :writable t)
+      (fs:vfs-add vfs "ro" directory)
+      (with-server (server port vfs events)
+        (with-client (client port)
+          (login client "user" "wrong")
+          (login client)
+          (send client "CWD rw")
+          (fetch client "LIST")
+          (fetch client "RETR hello.txt")
+          (store client "STOR new.txt" "1234567")
+          (store client "APPE new.txt" "89")
+          (send client "MKD sub")
+          (send client "RNFR new.txt")
+          (send client "RNTO sub/moved.txt")
+          (send client "DELE sub/moved.txt")
+          (send client "RMD sub")
+          (send client "CDUP")
+          (store client "STOR /ro/no.txt" "no")
+          (fetch client "RETR /rw/missing.txt")
+          ;; Housekeeping, which is not worth a line.
+          (send client "PWD")
+          (send client "TYPE I")
+          (send client "NOOP")
+          (send client "QUIT"))
+        (is-true (wait-until (lambda () (find :client-disconnected (funcall events)
+                                              :key #'first))))
+        (is (equal '(("user" "was refused: wrong user name or password")
+                     ("user" "logged in")
+                     ("user" "opened /rw")
+                     ("user" "listed /rw")
+                     ("user" "downloaded /rw/hello.txt (5 bytes)")
+                     ("user" "uploaded /rw/new.txt (7 bytes)")
+                     ("user" "appended to /rw/new.txt (2 bytes)")
+                     ("user" "created folder /rw/sub")
+                     ("user" "renamed /rw/new.txt to /rw/sub/moved.txt")
+                     ("user" "deleted /rw/sub/moved.txt")
+                     ("user" "removed folder /rw/sub")
+                     ("user" "opened /")
+                     ("user" "could not upload /ro/no.txt: This folder is read-only")
+                     ("user" "could not download /rw/missing.txt: No such file or directory"))
+                   (activity (funcall events))))))))
+
+(test the-password-is-never-in-what-the-server-says
+  (with-server (server port (fs:make-vfs) events)
+    (with-client (client port)
+      (login client "user" "wrong-secret")
+      (login client "user" "secret")
+      (send client "QUIT"))
+    (is-true (wait-until (lambda () (find :client-disconnected (funcall events)
+                                          :key #'first))))
+    (is (null (search "secret" (format nil "~s" (funcall events)))))))
+
+(test sizes-are-written-for-people
+  (is (string= "0 bytes" (fs::size-string 0)))
+  (is (string= "1 byte" (fs::size-string 1)))
+  (is (string= "1023 bytes" (fs::size-string 1023)))
+  (is (string= "1.0 KB" (fs::size-string 1024)))
+  (is (string= "1.5 MB" (fs::size-string (* 1536 1024))))
+  (is (string= "2.00 GB" (fs::size-string (* 2 1024 1024 1024)))))

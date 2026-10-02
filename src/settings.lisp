@@ -10,7 +10,7 @@
 
 (defun default-settings ()
   (list :version 1 :username "" :password "" :port *default-port*
-        :allow-remote nil :bonjour-name "" :mappings '()))
+        :allow-remote nil :bonjour-name "" :start-at-launch nil :mappings '()))
 
 (defun settings-file ()
   "Where the settings are kept.  Worked out when asked rather than when
@@ -70,6 +70,7 @@ A file that cannot be read at all gives the defaults."
         (take :port (lambda (value) (typep value '(integer 1 65535))))
         (take :bonjour-name #'stringp)
         (setf (getf settings :allow-remote) (true-p (getf form :allow-remote))
+              (getf settings :start-at-launch) (true-p (getf form :start-at-launch))
               (getf settings :mappings) (checked-mappings (getf form :mappings)))))
     settings))
 

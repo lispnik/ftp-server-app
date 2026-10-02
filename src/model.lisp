@@ -14,6 +14,8 @@
                  :documentation "Listen on every interface rather than loopback.")
    (bonjour-name :initform "" :accessor model-bonjour-name
                  :documentation "Empty for the computer's own name.")
+   (start-at-launch :initform nil :accessor model-start-at-launch
+                    :documentation "Start serving as soon as the window is up.")
    (server :initform nil :accessor model-server)))
 
 ;;; Settings ---------------------------------------------------------------------
@@ -23,7 +25,8 @@
         (model-password model) (getf settings :password)
         (model-port model) (getf settings :port)
         (model-allow-remote model) (getf settings :allow-remote)
-        (model-bonjour-name model) (getf settings :bonjour-name))
+        (model-bonjour-name model) (getf settings :bonjour-name)
+        (model-start-at-launch model) (getf settings :start-at-launch))
   (dolist (item (getf settings :mappings))
     ;; A mapping the file should not have had is dropped, not fatal.
     (handler-case (vfs-add (model-vfs model) (getf item :name) (getf item :path)
@@ -41,6 +44,7 @@
         :port (model-port model)
         :allow-remote (model-allow-remote model)
         :bonjour-name (model-bonjour-name model)
+        :start-at-launch (model-start-at-launch model)
         :mappings (mapcar (lambda (mapping)
                             (list :name (mapping-name mapping)
                                   :path (mapping-host-path mapping)
@@ -161,7 +165,9 @@ Answers (values T NIL), or (values NIL MESSAGE)."
                                       (let ((user-ok (constant-time-string= user username))
                                             (pass-ok (constant-time-string= pass password)))
                                         (and user-ok pass-ok)))
-                     :address (if (model-allow-remote model) *any-address* *loopback*)
+                     :addresses (if (model-allow-remote model)
+                                    *any-addresses*
+                                    *loopback-addresses*)
                      :port (model-port model)
                      :on-event on-event)))
        (handler-case

@@ -45,6 +45,35 @@ the end of the stream, and it closes its own sockets on the way out."
   (shutdown-quietly (session-socket session))
   (shutdown-quietly (session-data session)))
 
+(defun activity-path (session verb argument cwd)
+  "The path the command was about, as the client knows it, from the directory
+CWD it was sent in."
+  (or (ignore-errors
+       (virtual-path-string
+        (cond ((member verb '("CDUP" "XCUP") :test #'string=)
+               (session-cwd session))
+              ((member verb '("LIST" "NLST") :test #'string=)
+               (parse-virtual-path cwd (strip-list-options argument)))
+              (t (parse-virtual-path cwd (or argument ""))))))
+      (or argument "")))
+
+(defun run-command (session verb argument)
+  "Run one command, answer the client, and say what it did."
+  (let ((cwd (session-cwd session))
+        (from (third (session-rename-from session))))
+    (setf (session-transferred session) 0)
+    (multiple-value-bind (code text) (dispatch session verb argument)
+      ;; Said before the reply is sent: the reply can fail, if the client has
+      ;; gone, and what happened to the file is true either way.
+      (let ((sentence (describe-activity verb (activity-path session verb argument cwd)
+                                         code text
+                                         :size (session-transferred session)
+                                         :from from)))
+        (when sentence
+          (server-emit (session-server session) :activity
+                       (session-user session) (session-peer session) sentence)))
+      (session-reply session code text))))
+
 (defun run-session (session)
   "Greet the client, then read and answer commands until it leaves."
   (handler-case
@@ -58,9 +87,7 @@ the end of the stream, and it closes its own sockets on the way out."
                          ((string= "" (string-trim " " line)))
                          (t
                           (multiple-value-bind (verb argument) (parse-command-line line)
-                            (multiple-value-bind (code text)
-                                (dispatch session verb argument)
-                              (session-reply session code text))))))))
+                            (run-command session verb argument)))))))
     ;; The client went away, or said nothing for too long.
     (stream-error () nil)
     (sb-sys:io-timeout () nil)
@@ -68,19 +95,33 @@ the end of the stream, and it closes its own sockets on the way out."
 
 ;;; Opening a data connection ---------------------------------------------------------
 
+(defun session-counter (session)
+  "A function that adds to the session's count of octets transferred."
+  (lambda (octets) (incf (session-transferred session) octets)))
+
 (defun open-passive (session)
   "Listen for a data connection on the address the client reached us at, on any
 free port, and answer the socket."
   (session-close-passive session)
-  (setf (session-passive session)
-        (listen-on (local-address (session-socket session)) 0 :backlog 1)))
+  (let ((local (local-address (session-socket session))))
+    (setf (session-passive session)
+          (handler-case (listen-on local 0 :backlog 1)
+            ;; A link-local IPv6 address cannot be bound without its interface,
+            ;; which SOCKET-NAME does not say.  Every address of that family,
+            ;; then; who may connect is checked when someone does.
+            (sb-bsd-sockets:socket-error ()
+              (listen-on (if (ipv6-address-p local) *any-address6* *any-address*)
+                         0 :backlog 1))))))
 
 (define-command "PASV" (session argument)
-  (let* ((listener (open-passive session))
-         (port (socket-port listener)))
-    (values 227 (format nil "Entering Passive Mode (~{~d~^,~},~d,~d)."
-                        (coerce (local-address (session-socket session)) 'list)
-                        (ash port -8) (logand port 255)))))
+  (if (ipv6-address-p (local-address (session-socket session)))
+      ;; Its reply has room for four octets of address and no more.
+      (values 522 "PASV cannot describe an IPv6 address; use EPSV.")
+      (let* ((listener (open-passive session))
+             (port (socket-port listener)))
+        (values 227 (format nil "Entering Passive Mode (~{~d~^,~},~d,~d)."
+                            (coerce (local-address (session-socket session)) 'list)
+                            (ash port -8) (logand port 255))))))
 
 (define-command "EPSV" (session argument)
   (if (and argument (string-equal "ALL" (string-trim " " argument)))
@@ -171,11 +212,13 @@ and answer the reply that ends the transfer."
 
 ;;; Files -------------------------------------------------------------------------
 
-(defun copy-octets (from to)
+(defun copy-octets (from to count)
+  "Copy FROM to TO, calling COUNT with the size of each piece as it goes."
   (let ((buffer (make-array *transfer-buffer-size* :element-type '(unsigned-byte 8))))
     (loop for end = (read-sequence buffer from)
           while (plusp end)
-          do (write-sequence buffer to :end end))))
+          do (write-sequence buffer to :end end)
+             (funcall count end))))
 
 ;;; ASCII transfers ---------------------------------------------------------------
 ;;;
@@ -224,8 +267,9 @@ A CR that no LF follows is not a line ending and is kept."
           (incf fill))))
     (values fill pending-cr)))
 
-(defun copy-octets-to-ascii (from to)
-  "Send the file FROM down the data connection TO, in ASCII."
+(defun copy-octets-to-ascii (from to count)
+  "Send the file FROM down the data connection TO, in ASCII.  COUNT is called
+with how much of the file each piece was."
   (let ((in (make-array *transfer-buffer-size* :element-type '(unsigned-byte 8)))
         (out (make-array (* 2 *transfer-buffer-size*) :element-type '(unsigned-byte 8)))
         (previous nil))
@@ -233,10 +277,12 @@ A CR that no LF follows is not a line ending and is kept."
           while (plusp end)
           do (multiple-value-bind (fill last) (ascii-encode in end out previous)
                (setf previous last)
-               (write-sequence out to :end fill)))))
+               (write-sequence out to :end fill)
+               (funcall count end)))))
 
-(defun copy-octets-from-ascii (from to)
-  "Receive the data connection FROM, in ASCII, into the file TO."
+(defun copy-octets-from-ascii (from to count)
+  "Receive the data connection FROM, in ASCII, into the file TO.  COUNT is
+called with how much each piece put in the file."
   (let ((in (make-array *transfer-buffer-size* :element-type '(unsigned-byte 8)))
         (out (make-array (1+ *transfer-buffer-size*) :element-type '(unsigned-byte 8)))
         (pending-cr nil))
@@ -244,10 +290,12 @@ A CR that no LF follows is not a line ending and is kept."
           while (plusp end)
           do (multiple-value-bind (fill pending) (ascii-decode in end out pending-cr)
                (setf pending-cr pending)
-               (write-sequence out to :end fill)))
+               (write-sequence out to :end fill)
+               (funcall count fill)))
     ;; The very last octet was a CR, with nothing after it to decide by.
     (when pending-cr
-      (write-byte +cr+ to))))
+      (write-byte +cr+ to)
+      (funcall count 1))))
 
 (defun open-host-file (host-path flags &optional (mode #o644))
   "A stream of octets on HOST-PATH, opened with FLAGS and never through a
@@ -276,9 +324,10 @@ symbolic link."
         (call-with-data-connection
          session
          (lambda (stream)
-           (if (eq :ascii (session-transfer-type session))
-               (copy-octets-to-ascii file stream)
-               (copy-octets file stream))))))))
+           (funcall (if (eq :ascii (session-transfer-type session))
+                        #'copy-octets-to-ascii
+                        #'copy-octets)
+                    file stream (session-counter session))))))))
 
 (defun store-file (session argument append)
   (multiple-value-bind (mapping host-path) (resolve-for-change session argument)
@@ -302,9 +351,10 @@ symbolic link."
               session
               (lambda (stream)
                 (handler-case (progn
-                                (if (eq :ascii (session-transfer-type session))
-                                    (copy-octets-from-ascii stream file)
-                                    (copy-octets stream file))
+                                (funcall (if (eq :ascii (session-transfer-type session))
+                                             #'copy-octets-from-ascii
+                                             #'copy-octets)
+                                         stream file (session-counter session))
                                 (finish-output file))
                   ;; The disk, not the connection: still an aborted transfer.
                   (file-error () (error 'transfer-failed))))))
