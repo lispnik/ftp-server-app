@@ -128,7 +128,8 @@ it while it lasts."
       (progn
         (ensure-frameworks)
         (objc.runloop:shared-application)
-        (setf *password-store* (choose-password-store))
+        (setf *password-store* (choose-password-store)
+              *tls-maker* 'make-default-tls)
         (let ((controller (build-application (model-load)))
               (seconds (self-test-seconds)))
           (show-window controller)

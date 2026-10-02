@@ -297,3 +297,17 @@
           (setf (fs:model-password loaded) "")
           (is-true (fs:model-save loaded (settings-in directory)))
           (is (null (fs::keychain-get service "FTP login"))))))))
+
+(test requiring-tls-is-a-setting-like-the-others
+  (with-controller (controller directory)
+    (is (= 0 (objc:invoke (fs::controller-tls-checkbox controller) "state")))
+    (objc:invoke (fs::controller-tls-checkbox controller) "performClick:" (cffi:null-pointer))
+    (is-true (fs:model-require-tls (fs::controller-model controller)))
+    (is (eq t (getf (fs:load-settings
+                     (sb-ext:parse-native-namestring (path directory "settings.lisp")))
+                    :require-tls)))
+    ;; With no TLS to be had, as here, a server that requires it will not start.
+    (fill-in controller)
+    (let ((fs:*tls-maker* nil))
+      (is-false (fs::controller-start controller))
+      (is (search "TLS is required" (status controller))))))

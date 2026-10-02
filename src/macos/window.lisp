@@ -16,6 +16,7 @@
    (bonjour-field :initform nil :accessor controller-bonjour-field)
    (remote-checkbox :initform nil :accessor controller-remote-checkbox)
    (launch-checkbox :initform nil :accessor controller-launch-checkbox)
+   (tls-checkbox :initform nil :accessor controller-tls-checkbox)
    (activity-view :initform nil :accessor controller-activity-view)
    (activity :initform '() :accessor controller-activity
              :documentation "The lines of the activity pane, newest first.")
@@ -66,7 +67,8 @@ may log in are fixed while it runs; the folders are not."
                            (controller-password-field controller)
                            (controller-port-field controller)
                            (controller-bonjour-field controller)
-                           (controller-remote-checkbox controller)))
+                           (controller-remote-checkbox controller)
+                           (controller-tls-checkbox controller)))
       (objc:invoke control "setEnabled:" (not running)))
     (objc:invoke (controller-remove-button controller) "setEnabled:"
                  (>= (objc:invoke table "selectedRow") 0))))
@@ -86,6 +88,8 @@ may log in are fixed while it runs; the folders are not."
                  (if (model-allow-remote model) 1 0))
     (objc:invoke (controller-launch-checkbox controller) "setState:"
                  (if (model-start-at-launch model) 1 0))
+    (objc:invoke (controller-tls-checkbox controller) "setState:"
+                 (if (model-require-tls model) 1 0))
     (objc:invoke (controller-table controller) "reloadData")
     (refresh-controls controller)))
 
@@ -101,7 +105,9 @@ not one; the other fields are taken as they are."
           (model-allow-remote model)
           (= 1 (objc:invoke (controller-remote-checkbox controller) "state"))
           (model-start-at-launch model)
-          (= 1 (objc:invoke (controller-launch-checkbox controller) "state")))
+          (= 1 (objc:invoke (controller-launch-checkbox controller) "state"))
+          (model-require-tls model)
+          (= 1 (objc:invoke (controller-tls-checkbox controller) "state")))
     (cond (port
            (setf (model-port model) port)
            (values t nil))
@@ -188,6 +194,8 @@ they are connecting from."
                                       (controller-server-event controller event
                                                                arguments)))))))
       (when ok
+        (when (model-tls-description model)
+          (controller-add-activity controller nil (model-tls-description model)))
         (when (model-advertise-p model)
           (handler-case
               (bonjour-publish (server-port (model-server model))
@@ -394,7 +402,7 @@ they are connecting from."
     table))
 
 (defparameter +window-width+ 560d0)
-(defparameter +window-height+ 680d0)
+(defparameter +window-height+ 704d0)
 (defparameter +activity-height+ 120d0)
 
 (defun add-checkbox (content title frame mask target)
@@ -473,6 +481,8 @@ is what grows when the window does."
                    "This computer’s name")
       (setf (controller-remote-checkbox controller)
             (checkbox "Allow connections from other computers")
+            (controller-tls-checkbox controller)
+            (checkbox "Require TLS: refuse clients that do not encrypt")
             (controller-launch-checkbox controller)
             (checkbox "Start serving when FTP Server opens")))
 

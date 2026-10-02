@@ -72,7 +72,13 @@ CWD it was sent in."
         (when sentence
           (server-emit (session-server session) :activity
                        (session-user session) (session-peer session) sentence)))
-      (session-reply session code text))))
+      (session-reply session code text)
+      ;; AUTH was agreed to, and its reply has gone: the handshake, and from
+      ;; here on an encrypted stream in place of the plain one.
+      (when (shiftf (session-pending-tls session) nil)
+        (setf (session-stream session)
+              (funcall (server-tls (session-server session)) (session-stream session))
+              (session-secure-p session) t)))))
 
 (defun run-session (session)
   "Greet the client, then read and answer commands until it leaves."
@@ -91,7 +97,15 @@ CWD it was sent in."
     ;; The client went away, or said nothing for too long.
     (stream-error () nil)
     (sb-sys:io-timeout () nil)
-    (sb-bsd-sockets:socket-error () nil)))
+    (sb-bsd-sockets:socket-error () nil)
+    ;; Anything else is worth a line, unless TLS is in it: a handshake that
+    ;; fails and a client that hangs up without saying goodbye are both
+    ;; signalled by the TLS library in conditions of its own, and both are
+    ;; only a client going away.
+    (error (condition)
+      (unless (or (session-secure-p session)
+                  (server-tls (session-server session)))
+        (server-log (session-server session) "session: ~a" condition)))))
 
 ;;; Opening a data connection ---------------------------------------------------------
 
@@ -134,8 +148,11 @@ free port, and answer the socket."
 (defun call-with-data-connection (session function)
   "Call FUNCTION with a stream on the data connection the client was promised,
 and answer the reply that ends the transfer."
-  (let ((listener (session-passive session)))
+  (let ((listener (session-passive session))
+        (protect (session-protect-data session)))
     (cond
+      ((and (server-require-tls (session-server session)) (not protect))
+       (values 522 "Data connections must be encrypted; send PROT P."))
       ((null listener)
        (values 425 "Use PASV or EPSV first."))
       (t
@@ -156,12 +173,24 @@ and answer the reply that ends the transfer."
             (unwind-protect
                  (handler-case
                      (let ((stream (octet-stream data :timeout *data-timeout*)))
+                       (when protect
+                         (setf stream (funcall (server-tls (session-server session))
+                                               stream)))
                        (funcall function stream)
                        (finish-output stream)
+                       ;; Closing an encrypted stream is what tells the client
+                       ;; that the data ended rather than was cut off.
+                       (when protect
+                         (ignore-errors (close stream)))
                        (values 226 "Transfer complete."))
                    ((or stream-error sb-sys:io-timeout sb-bsd-sockets:socket-error
                      transfer-failed) ()
-                     (values 426 "The connection closed; transfer aborted.")))
+                     (values 426 "The connection closed; transfer aborted."))
+                   ;; The TLS library's own conditions, which this file cannot name.
+                   (error (condition)
+                     (if protect
+                         (values 426 "The connection closed; transfer aborted.")
+                         (error condition))))
               (close-quietly (shiftf (session-data session) nil))))))))))
 
 ;;; Listings ------------------------------------------------------------------------

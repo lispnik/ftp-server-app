@@ -14,7 +14,14 @@
   ((server :initarg :server :reader session-server)
    (vfs :initarg :vfs :reader session-vfs)
    (socket :initarg :socket :initform nil :reader session-socket)
-   (stream :initarg :stream :initform nil :reader session-stream)
+   (stream :initarg :stream :initform nil :accessor session-stream)
+   (secure :initform nil :accessor session-secure-p
+           :documentation "Whether the control connection is encrypted.")
+   (pending-tls :initform nil :accessor session-pending-tls
+                :documentation "AUTH has been agreed to; the handshake follows
+its reply.")
+   (protect-data :initform nil :accessor session-protect-data
+                 :documentation "Whether data connections are encrypted: PROT P.")
    (peer :initarg :peer :initform nil :reader session-peer)
    (state :initform :new :accessor session-state
           :documentation ":NEW, :NEED-PASSWORD or :LOGGED-IN.")
@@ -145,11 +152,63 @@ and anything in a mapping that is not writable."
 
 ;;; Logging in ---------------------------------------------------------------------
 
+(defun tls-required-p (session)
+  "Whether this session has yet to do what a server that requires TLS requires."
+  (and (server-require-tls (session-server session))
+       (not (session-secure-p session))))
+
 (define-command "USER" (session argument :login nil)
-  ;; The same answer whoever it is: which names exist is not a client's to learn.
-  (setf (session-state session) :need-password
-        (session-user session) (or argument ""))
-  (values 331 "Password required."))
+  (cond ((tls-required-p session)
+         ;; Before the name, let alone the password, is sent in the clear.
+         (values 530 "This server requires TLS; send AUTH TLS first."))
+        (t
+         ;; The same answer whoever it is: which names exist is not a client's
+         ;; to learn.
+         (setf (session-state session) :need-password
+               (session-user session) (or argument ""))
+         (values 331 "Password required."))))
+
+;;; Encryption ---------------------------------------------------------------------
+;;;
+;;; Explicit FTP over TLS, RFC 4217: the client connects in the clear, asks for
+;;; TLS with AUTH, and everything after the reply to that is encrypted.  PROT P
+;;; then asks for the data connections to be encrypted as well.
+
+(define-command "AUTH" (session argument :login nil)
+  (let ((mechanism (string-upcase (string-trim " " (or argument "")))))
+    (cond ((null (server-tls (session-server session)))
+           (values 502 "TLS is not available on this server."))
+          ((not (member mechanism '("TLS" "TLS-C" "SSL") :test #'string=))
+           (values 504 "Only AUTH TLS is supported."))
+          ((session-secure-p session)
+           (values 503 "The connection is already encrypted."))
+          (t
+           ;; The handshake itself comes after this reply has gone, in the
+           ;; clear, which is the last thing that does.  Whoever was logging in
+           ;; starts again.
+           (setf (session-pending-tls session) t
+                 (session-state session) :new)
+           (values 234 "Proceed with the TLS negotiation.")))))
+
+(define-command "PBSZ" (session argument :login nil)
+  (if (session-secure-p session)
+      (values 200 "PBSZ=0")
+      (values 503 "Send AUTH TLS first.")))
+
+(define-command "PROT" (session argument :login nil)
+  (let ((level (string-upcase (string-trim " " (or argument "")))))
+    (cond ((not (session-secure-p session))
+           (values 503 "Send AUTH TLS first."))
+          ((string= level "P")
+           (setf (session-protect-data session) t)
+           (values 200 "Data connections will be encrypted."))
+          ((string= level "C")
+           (cond ((server-require-tls (session-server session))
+                  (values 534 "This server requires encrypted data connections."))
+                 (t
+                  (setf (session-protect-data session) nil)
+                  (values 200 "Data connections will not be encrypted."))))
+          (t (values 504 "Only PROT P and PROT C are supported.")))))
 
 (define-command "PASS" (session argument :login nil)
   (cond ((not (eq :need-password (session-state session)))
@@ -174,10 +233,14 @@ and anything in a mapping that is not writable."
   (values 215 "UNIX Type: L8"))
 
 (define-command "FEAT" (session argument :login nil)
-  (values 211 '("Features:"
+  (values 211 `("Features:"
+                ,@(when (server-tls (session-server session))
+                    '(" AUTH TLS"))
                 " EPSV"
                 " MDTM"
                 " MLST type*;size*;modify*;perm*;"
+                ,@(when (server-tls (session-server session))
+                    '(" PBSZ" " PROT"))
                 " REST STREAM"
                 " SIZE"
                 " UTF8"
@@ -378,6 +441,10 @@ FROM the path a rename started at."
     (cond
       ((string= verb "PASS")
        (if (= code 230) "logged in" "was refused: wrong user name or password"))
+      ((string= verb "AUTH")
+       (and (= code 234) "asked for an encrypted connection"))
+      ((and (string= verb "USER") (= code 530))
+       "was refused: this server requires TLS")
       ((null phrase) nil)
       ;; A transfer that began and did not finish.
       ((and (= code 426) (member verb '("RETR" "STOR" "APPE") :test #'string=))

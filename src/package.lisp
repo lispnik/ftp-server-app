@@ -20,7 +20,8 @@
    #:model #:make-model #:model-load #:model-save #:model-vfs
    #:password-store #:make-password-store #:*password-store*
    #:model-username #:model-password #:model-port #:model-allow-remote
-   #:model-bonjour-name #:model-start-at-launch #:model-running-p #:model-advertise-p
+   #:model-bonjour-name #:model-start-at-launch #:model-require-tls
+   #:model-tls-description #:*tls-maker* #:model-running-p #:model-advertise-p
    #:model-add-directory #:model-remove-mapping #:model-rename-mapping
    #:model-set-writable #:model-start #:model-stop #:model-status-text
    #:parse-port

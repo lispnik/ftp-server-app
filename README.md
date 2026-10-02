@@ -45,6 +45,9 @@ certificate. Put that in `local.mk`, which is not committed.
   Bonjour.
 - **Bonjour name.** The name the server is announced under; empty means this
   computer's name.
+- **Require TLS.** Refuses any client that does not encrypt, before it has
+  sent a name or a password. Without it TLS is offered and plain FTP is still
+  accepted.
 - **Start serving when FTP Server opens.** Starts the server as soon as the
   window is up.
 - **Shared folders.** Add… chooses folders; double-click a name to change it;
@@ -66,6 +69,7 @@ which every current client does; `PASV` has no room for the address.
 curl --user name:password ftp://127.0.0.1:2121/
 curl --user name:password ftp://127.0.0.1:2121/tempdir/
 curl --user name:password -T file.txt ftp://127.0.0.1:2121/tempdir/   # needs Writable
+curl --ssl-reqd -k --user name:password ftp://127.0.0.1:2121/         # over TLS; -k trusts the certificate
 dns-sd -B _ftp._tcp                                                   # the Bonjour announcement
 ```
 
@@ -74,9 +78,19 @@ and the log in `~/Library/Logs/FTP Server.log`.
 
 ## What to know before using it
 
-- **FTP is not encrypted.** The password and every file cross the network in
-  the clear. Leave "Allow connections from other computers" off unless you
-  trust the network.
+- **Plain FTP is not encrypted**, and unless "Require TLS" is ticked the server
+  accepts it: the password and every file then cross the network in the clear.
+  Tick it before allowing connections from other computers on a network you do
+  not trust.
+- **TLS is explicit FTP over TLS** (`AUTH TLS`, then `PROT P` for the data),
+  TLS 1.2 and later, which is what clients call "FTPS (explicit)" or "FTP with
+  TLS/SSL". The certificate is one the server makes for itself the first time,
+  kept beside the settings as `certificate.pem` and `private-key.pem`. Nobody
+  has vouched for it, so a client will ask you to trust it; its SHA-256
+  fingerprint is in the activity pane each time the server starts, to compare
+  against. Delete the two files to have a new one made.
+- **TLS uses OpenSSL**, through cl+ssl. The build needs Homebrew's
+  (`brew install openssl`); the bundle carries its own copy and uses that one.
 - **The password is kept in your login keychain**, as the item
   `org.lispnik.ftp-server`, and not in the settings file. A settings file from
   before that, with a password in it, has it moved to the keychain the first
@@ -101,7 +115,7 @@ and the log in `~/Library/Logs/FTP Server.log`.
 ## Layout
 
 ```
-ftp-server.asd       ftp-server/core, ftp-server, ftp-server/tests
+ftp-server.asd       ftp-server/core, ftp-server/tls, ftp-server, ftp-server/tests
 ftp-server-app.asd   the bundle
 src/                 the server; no Objective-C, depends only on SBCL's contribs
   vfs.lisp           mappings, virtual paths, staying inside a mapping
@@ -111,6 +125,7 @@ src/                 the server; no Objective-C, depends only on SBCL's contribs
   protocol.lisp      commands that move no data
   session.lisp       one client; PASV, listings and transfers
   settings.lisp      the settings file
+  tls.lisp           the certificate and the handshake; the only file that knows OpenSSL
   model.lisp         what the window does, with no window in it
 src/macos/           the window, the Bonjour announcement, the application
 tests/               FiveAM; ui-tests drive the real window without showing it

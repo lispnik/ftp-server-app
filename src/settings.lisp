@@ -10,7 +10,13 @@
 
 (defun default-settings ()
   (list :version 1 :username "" :password "" :port *default-port*
-        :allow-remote nil :bonjour-name "" :start-at-launch nil :mappings '()))
+        :allow-remote nil :bonjour-name "" :start-at-launch nil :require-tls nil
+        :mappings '()))
+
+(defun settings-directory ()
+  "The directory the settings file is in, where the TLS certificate is kept
+beside it."
+  (uiop:pathname-directory-pathname (settings-file)))
 
 (defun settings-file ()
   "Where the settings are kept.  Worked out when asked rather than when
@@ -71,6 +77,7 @@ A file that cannot be read at all gives the defaults."
         (take :bonjour-name #'stringp)
         (setf (getf settings :allow-remote) (true-p (getf form :allow-remote))
               (getf settings :start-at-launch) (true-p (getf form :start-at-launch))
+              (getf settings :require-tls) (true-p (getf form :require-tls))
               (getf settings :mappings) (checked-mappings (getf form :mappings)))))
     settings))
 

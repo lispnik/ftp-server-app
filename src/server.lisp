@@ -32,6 +32,12 @@ rest are listened on if they can be.")
    (port :initform nil :accessor server-port
          :documentation "The port being listened on, once started.")
    (on-event :initarg :on-event :reader server-on-event)
+   (tls :initarg :tls :initform nil :reader server-tls
+        :documentation "NIL, or a function that takes a stream of octets on a
+connection that has just been accepted, does the server's half of a TLS
+handshake over it, and answers the encrypted stream.")
+   (require-tls :initarg :require-tls :initform nil :reader server-require-tls
+                :documentation "Refuse to take a password, or move data, in the clear.")
    (listeners :initform '() :accessor server-listeners)
    (accept-threads :initform '() :accessor server-accept-threads)
    (stopping :initform nil :accessor server-stopping-p)
@@ -42,7 +48,7 @@ rest are listened on if they can be.")
          :reader server-lock)))
 
 (defun make-server (&key vfs authenticator (addresses *loopback-addresses*) (port 2121)
-                      on-event)
+                      on-event tls require-tls)
   "A server that is not yet listening.
 
 ON-EVENT, if given, is called on the server's threads with a keyword and its
@@ -53,7 +59,8 @@ arguments:
   :ACTIVITY user address text   what a client did, in words
   :LOG string                   something that went wrong"
   (make-instance 'server :vfs vfs :authenticator authenticator
-                         :addresses addresses :port port :on-event on-event))
+                         :addresses addresses :port port :on-event on-event
+                         :tls tls :require-tls require-tls))
 
 (defun server-emit (server event &rest arguments)
   (let ((function (server-on-event server)))

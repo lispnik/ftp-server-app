@@ -16,6 +16,11 @@
                  :documentation "Empty for the computer's own name.")
    (start-at-launch :initform nil :accessor model-start-at-launch
                     :documentation "Start serving as soon as the window is up.")
+   (require-tls :initform nil :accessor model-require-tls
+                :documentation "Refuse clients that do not encrypt.")
+   (tls-description :initform nil :accessor model-tls-description
+                    :documentation "While running with TLS: a sentence about
+the certificate in use.")
    (server :initform nil :accessor model-server)))
 
 ;;; Settings ---------------------------------------------------------------------
@@ -26,7 +31,8 @@
         (model-port model) (getf settings :port)
         (model-allow-remote model) (getf settings :allow-remote)
         (model-bonjour-name model) (getf settings :bonjour-name)
-        (model-start-at-launch model) (getf settings :start-at-launch))
+        (model-start-at-launch model) (getf settings :start-at-launch)
+        (model-require-tls model) (getf settings :require-tls))
   (dolist (item (getf settings :mappings))
     ;; A mapping the file should not have had is dropped, not fatal.
     (handler-case (vfs-add (model-vfs model) (getf item :name) (getf item :path)
@@ -45,6 +51,7 @@
         :allow-remote (model-allow-remote model)
         :bonjour-name (model-bonjour-name model)
         :start-at-launch (model-start-at-launch model)
+        :require-tls (model-require-tls model)
         :mappings (mapcar (lambda (mapping)
                             (list :name (mapping-name mapping)
                                   :path (mapping-host-path mapping)
@@ -185,6 +192,12 @@ service in every browser on the network that none of them could open."
                             (if (< index (length b)) (aref b index) 0)))))
     (zerop difference)))
 
+(defvar *tls-maker* nil
+  "NIL for a server with no TLS, or a function of no arguments that answers
+what MAKE-SERVER's :TLS wants and, as a second value, a sentence about the
+certificate.  It may signal an error.  The application sets this; the server
+itself knows nothing of any TLS library.")
+
 (defun model-start (model &key on-event)
   "Start the server with the model's settings.
 Answers (values T NIL), or (values NIL MESSAGE)."
@@ -199,7 +212,19 @@ Answers (values T NIL), or (values NIL MESSAGE)."
      ;; What a session checks against is what was set when the server started.
      (let* ((username (model-username model))
             (password (model-password model))
+            (tls-problem nil)
+            (tls-description nil)
+            (tls (and *tls-maker*
+                      (handler-case
+                          (multiple-value-bind (tls description) (funcall *tls-maker*)
+                            (setf tls-description description)
+                            tls)
+                        (error (condition)
+                          (setf tls-problem (princ-to-string condition))
+                          nil))))
             (server (make-server
+                     :tls tls
+                     :require-tls (model-require-tls model)
                      :vfs (model-vfs model)
                      :authenticator (lambda (user pass)
                                       (let ((user-ok (constant-time-string= user username))
@@ -210,9 +235,17 @@ Answers (values T NIL), or (values NIL MESSAGE)."
                                     *loopback-addresses*)
                      :port (model-port model)
                      :on-event on-event)))
+       (when (and (model-require-tls model) (null tls))
+         (return-from model-start
+           (values nil (format nil "TLS is required but is not available~@[: ~a~]"
+                               tls-problem))))
        (handler-case
            (progn (start-server server)
-                  (setf (model-server model) server)
+                  (setf (model-server model) server
+                        (model-tls-description model)
+                        (or tls-description
+                            (and tls-problem
+                                 (format nil "TLS is not available: ~a" tls-problem))))
                   (values t nil))
          (sb-bsd-sockets:address-in-use-error ()
            (values nil (format nil "Port ~d is already in use." (model-port model))))

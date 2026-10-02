@@ -23,12 +23,21 @@
                              (:file "model"))))
   :in-order-to ((test-op (test-op "ftp-server/tests"))))
 
+(defsystem "ftp-server/tls"
+  :description "TLS for the FTP server, with OpenSSL through cl+ssl."
+  :author "Matthew Kennedy <burnsidemk@gmail.com>"
+  :license "MIT"
+  :version "0.1.0"
+  :depends-on ("ftp-server/core" "cl+ssl")
+  :components ((:module "src"
+                :components ((:file "tls")))))
+
 (defsystem "ftp-server"
   :description "The FTP server in a Cocoa window."
   :author "Matthew Kennedy <burnsidemk@gmail.com>"
   :license "MIT"
   :version "0.1.0"
-  :depends-on ("ftp-server/core" "objc")
+  :depends-on ("ftp-server/core" "ftp-server/tls" "objc")
   :components ((:module "src/macos"
                 :pathname "src/macos/"
                 :serial t
@@ -51,6 +60,7 @@
                              (:file "settings-tests")
                              (:file "protocol-tests")
                              (:file "server-tests")
+                             (:file "tls-tests")
                              (:file "model-tests")
                              (:file "ui-tests"))))
   ;; FIVEAM:RUN! prints failures but returns NIL, and ASDF discards what a
