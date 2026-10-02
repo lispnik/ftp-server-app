@@ -35,7 +35,8 @@ rest are listened on if they can be.")
    (tls :initarg :tls :initform nil :reader server-tls
         :documentation "NIL, or a function that takes a stream of octets on a
 connection that has just been accepted, does the server's half of a TLS
-handshake over it, and answers the encrypted stream.")
+handshake over it, and answers the encrypted stream.  It is called with
+:DATA T for a data connection.")
    (require-tls :initarg :require-tls :initform nil :reader server-require-tls
                 :documentation "Refuse to take a password, or move data, in the clear.")
    (listeners :initform '() :accessor server-listeners)

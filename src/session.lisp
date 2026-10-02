@@ -175,7 +175,7 @@ and answer the reply that ends the transfer."
                      (let ((stream (octet-stream data :timeout *data-timeout*)))
                        (when protect
                          (setf stream (funcall (server-tls (session-server session))
-                                               stream)))
+                                               stream :data t)))
                        (funcall function stream)
                        (finish-output stream)
                        ;; Closing an encrypted stream is what tells the client

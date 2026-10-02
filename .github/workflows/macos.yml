@@ -94,7 +94,7 @@ jobs:
           # enough to matter: several attempts, and a failure here rather than
           # a mystery later.
           for attempt in 1 2 3 4 5; do
-            make deps 2>&1 | tee "$RUNNER_TEMP/ocicl-install.log"
+            make deps 2>&1 | tee "$RUNNER_TEMP/ocicl-install.log" || true
             if ! grep -q "failed to install" "$RUNNER_TEMP/ocicl-install.log"; then
               break
             fi

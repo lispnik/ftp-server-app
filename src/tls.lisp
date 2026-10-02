@@ -142,10 +142,52 @@ strings at addresses in a process that has ended."
 ;; The process this is loaded in is the one cl+ssl's state belongs to.
 (setf *tls-ready-in-process* (sb-posix:getpid))
 
+(defun tls-accept (context stream &key (tickets t))
+  "The server's side of a handshake over STREAM, in CONTEXT: an encrypted
+stream.  Without TICKETS the server sends no session tickets on it.
+
+This is cl+ssl's MAKE-SSL-SERVER-STREAM, taken apart for the one thing it has
+no argument for: something done to the connection between its being made and
+the handshake.  It is over the Lisp stream rather than its descriptor, so that
+the stream's timeouts still apply and shutting the socket down still wakes
+whoever is reading."
+  (cl+ssl:with-global-context (context)
+    (cl+ssl::ensure-initialized)
+    (let ((tls (make-instance 'cl+ssl::ssl-server-stream
+                              :socket stream
+                              :close-callback nil
+                              :certificate nil
+                              :key nil
+                              :input-buffer-size cl+ssl::*default-buffer-size*
+                              :output-buffer-size cl+ssl::*default-buffer-size*)))
+      (cl+ssl::with-new-ssl (handle)
+        (cl+ssl::install-handle-and-bio tls handle stream nil)
+        (cl+ssl::ssl-set-accept-state handle)
+        (unless tickets
+          (cffi:foreign-funcall "SSL_set_num_tickets" :pointer handle :size 0 :int))
+        (cl+ssl::collecting-verify-error (handle)
+          (cl+ssl::ensure-ssl-funcall tls #'plusp #'cl+ssl::ssl-accept handle))
+        (cl+ssl::handle-external-format tls nil)))))
+
 (defun make-tls-wrapper (certificate key)
   "A function for MAKE-SERVER's :TLS, serving CERTIFICATE with KEY: given a
 stream on a connection, it does the server's side of the handshake and answers
-the encrypted stream.  TLS 1.2 and later."
+the encrypted stream.  With :DATA true the connection is a data connection.
+TLS 1.2 and later.
+
+Session tickets go out on the control connection and not on data connections,
+and both halves of that matter.
+
+A client proves that a data connection is its own by resuming, on it, the
+session of its control connection; a careful client -- FileZilla -- warns when
+it cannot.  In TLS 1.3 a session is resumed with a ticket and with nothing
+else, so the control connection has to be given some.
+
+But in TLS 1.3 a server sends tickets after the handshake, unasked.  A client
+that is only uploading never reads them; a socket closed with something unread
+in it is reset rather than finished; and a reset throws away whatever of the
+upload had yet to arrive.  Large uploads lost their last part.  So a data
+connection, which has no use for a ticket of its own, is sent none."
   (ensure-tls-state)
   (let ((context (cl+ssl:make-context
                   :certificate-chain-file (sb-ext:native-namestring certificate)
@@ -153,18 +195,14 @@ the encrypted stream.  TLS 1.2 and later."
                   ;; Clients are known by their password, not by a certificate.
                   :verify-mode cl+ssl:+ssl-verify-none+
                   :min-proto-version cl+ssl::+tls1-2-version+)))
-    ;; No session tickets.  In TLS 1.3 a server sends them after the
-    ;; handshake, unasked; a client that is only uploading never reads them,
-    ;; and a socket closed with something unread in it is reset rather than
-    ;; finished, which throws away whatever of the upload had yet to arrive.
-    ;; Large uploads lost their last part until this was here.
-    (cffi:foreign-funcall "SSL_CTX_set_num_tickets" :pointer context :size 0 :int)
-    (lambda (stream)
-      (cl+ssl:with-global-context (context)
-        ;; Over the Lisp stream rather than its descriptor, so that the
-        ;; stream's timeouts still apply and shutting the socket down still
-        ;; wakes whoever is reading.
-        (cl+ssl:make-ssl-server-stream stream :unwrap-stream-p nil)))))
+    ;; What sessions made here are sessions of, which a server has to have
+    ;; said before it will resume one.
+    (cffi:with-foreign-string ((name length) "ftp-server")
+      (cffi:foreign-funcall "SSL_CTX_set_session_id_context"
+                            :pointer context :pointer name
+                            :unsigned-int (1- length) :int))
+    (lambda (stream &key data)
+      (tls-accept context stream :tickets (not data)))))
 
 (defun make-default-tls (&optional (directory (settings-directory)))
   "TLS with the certificate kept in DIRECTORY, beside the settings: the

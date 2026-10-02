@@ -8,7 +8,12 @@
 
 ;;; The commands, with nothing encrypted ---------------------------------------------
 
-(defun make-tls-test-session (&key (tls #'identity) require-tls (logged-in nil))
+(defun pretend-tls (stream &key data)
+  "TLS that encrypts nothing, for the commands that only ask whether there is any."
+  (declare (ignore data))
+  stream)
+
+(defun make-tls-test-session (&key (tls #'pretend-tls) require-tls (logged-in nil))
   "A session with no connection on a server whose TLS is the function TLS."
   (let* ((vfs (fs:make-vfs))
          (server (fs:make-server :vfs vfs :tls tls :require-tls require-tls
@@ -87,10 +92,24 @@
 
 ;;; Over the wire --------------------------------------------------------------------
 
+(defvar *client-context* nil
+  "The TLS context the test client makes its connections in.")
+
+(defun client-context ()
+  "A context that keeps no cache of sessions.  cl+ssl's own does, and an
+OpenSSL client that caches its sessions drops a TLS 1.3 session the first time
+it is resumed -- so the control connection's session would be good for one
+data connection and no more, by the client's choice and not the server's."
+  (or *client-context*
+      (setf *client-context*
+            (cl+ssl:make-context :verify-mode cl+ssl:+ssl-verify-none+
+                                 :session-cache-mode cl+ssl:+ssl-sess-cache-off+))))
+
 (defun client-tls (stream)
   "The client's side of a handshake over STREAM.  The certificate is one the
 server made for itself, so there is nothing to check it against."
-  (cl+ssl:make-ssl-client-stream stream :unwrap-stream-p nil :verify nil))
+  (cl+ssl:with-global-context ((client-context))
+    (cl+ssl:make-ssl-client-stream stream :unwrap-stream-p nil :verify nil)))
 
 (defun secure-client (client)
   "AUTH TLS, and the handshake.  Answers the reply's code."
@@ -293,3 +312,112 @@ server made for itself, so there is nothing to check it against."
           ;; And the new key is as private as the old.
           (is (= #o600 (logand #o777 (sb-posix:stat-mode
                                       (sb-posix:stat (path directory "private-key.pem")))))))))))
+
+;;; Resuming the control connection's session on a data connection -----------------------
+;;;
+;;; What a careful client does, so that nobody else can take its data
+;;; connection: FileZilla warns when a server will not let it.  cl+ssl has no
+;;; argument for the session to resume, so the client's handshake is taken
+;;; apart here as the server's is in tls.lisp.
+
+(defun client-tls-resuming (stream session)
+  "The client's side of a handshake over STREAM, offering to resume SESSION."
+  (cl+ssl:with-global-context ((client-context))
+    (cl+ssl::ensure-initialized)
+    (let ((tls (make-instance 'cl+ssl::ssl-stream
+                              :socket stream :close-callback nil
+                              :input-buffer-size cl+ssl::*default-buffer-size*
+                              :output-buffer-size cl+ssl::*default-buffer-size*)))
+      (cl+ssl::with-new-ssl (handle)
+        (cl+ssl::install-handle-and-bio tls handle stream nil)
+        (cl+ssl::ssl-set-connect-state handle)
+        (cffi:foreign-funcall "SSL_set_session" :pointer handle :pointer session :int)
+        (cl+ssl::ensure-ssl-funcall tls #'plusp #'cl+ssl::ssl-connect handle)
+        (cl+ssl::handle-external-format tls nil)))))
+
+(defun tls-handle (stream)
+  (cl+ssl::ssl-stream-handle stream))
+
+(defun session-of (stream)
+  "The session of the TLS stream STREAM, to be freed by the caller."
+  (cffi:foreign-funcall "SSL_get1_session" :pointer (tls-handle stream) :pointer))
+
+(defun resumed-p (stream)
+  (= 1 (cffi:foreign-funcall "SSL_session_reused" :pointer (tls-handle stream) :int)))
+
+(defun tls-version (stream)
+  (cffi:foreign-funcall "SSL_get_version" :pointer (tls-handle stream) :string))
+
+(defun close-keeping-session (tls)
+  "Close TLS so that its session can be resumed again.
+
+OpenSSL gives up on a session whose connection ends badly, and by then the
+server has closed this one: saying goodbye to it fails, and a connection freed
+without having said goodbye counts as ended badly too.  Either way the
+session, which is the control connection's, would be good for one data
+connection and no more -- which is the client's library being careful, not the
+server refusing.  So the connection is marked as properly finished, which it
+was, and then let go."
+  (cffi:foreign-funcall "SSL_set_shutdown" :pointer (tls-handle tls) :int 3 :void)
+  (ignore-errors (close tls :abort t)))
+
+(defun fetch-resuming (client command)
+  "Run COMMAND over a data connection that resumes the control connection's
+session: (values CODE DATA RESUMED-P)."
+  (let ((session (session-of (client-stream client))))
+    (unwind-protect
+         (multiple-value-bind (socket stream) (connect-to (passive-port client :extended t))
+           (unwind-protect
+                (let ((code (send client command)))
+                  (if (eql code 150)
+                      (let* ((tls (client-tls-resuming stream session))
+                             (resumed (resumed-p tls))
+                             (data (read-all tls)))
+                        (close-keeping-session tls)
+                        (values (read-reply client) data resumed))
+                      (values code nil nil)))
+             (ignore-errors (sb-bsd-sockets:socket-close socket :abort t))))
+      (cffi:foreign-funcall "SSL_SESSION_free" :pointer session :void))))
+
+(test a-data-connection-can-resume-the-control-connections-session
+  (with-temporary-directory (directory)
+    (write-file (path directory "hello.txt") "resumed")
+    (let ((vfs (fs:make-vfs)))
+      (fs:vfs-add vfs "m" directory)
+      (with-tls-server (port vfs)
+        (with-client (client port)
+          (secure-client client)
+          ;; The replies to these are read after the handshake, and in TLS 1.3
+          ;; it is then that the client is given what it resumes with.
+          (login client)
+          (send client "PBSZ 0")
+          (send client "PROT P")
+          (is (string= "TLSv1.3" (tls-version (client-stream client))))
+          (is-false (resumed-p (client-stream client)) "the control connection is new")
+          ;; More than once: one ticket has to do for every data connection.
+          (dotimes (attempt 3)
+            (multiple-value-bind (code data resumed) (fetch-resuming client "RETR /m/hello.txt")
+              (is (= 226 code))
+              (is (string= "resumed" data))
+              (is-true resumed "the data connection resumed the control session"))))))))
+
+(test resuming-does-not-bring-back-the-truncated-upload
+  ;; Tickets are what resumption needs and what cut uploads short, so both at
+  ;; once: a control connection that hands them out, and a large upload over a
+  ;; data connection that must not be sent any.
+  (with-temporary-directory (directory)
+    (let ((vfs (fs:make-vfs))
+          (text (make-string 1500000 :initial-element #\x)))
+      (fs:vfs-add vfs "m" directory :writable t)
+      (with-tls-server (port vfs)
+        (with-client (client port)
+          (secure-client client)
+          (login client)
+          (send client "PBSZ 0")
+          (send client "PROT P")
+          (is (= 226 (tls-store client "STOR /m/big.txt" text)))
+          (is (= 1500000 (length (read-file (path directory "big.txt")))))
+          (multiple-value-bind (code data resumed) (fetch-resuming client "RETR /m/big.txt")
+            (is (= 226 code))
+            (is (= 1500000 (length data)))
+            (is-true resumed)))))))
