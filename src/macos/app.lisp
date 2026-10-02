@@ -128,7 +128,8 @@ it while it lasts."
       (progn
         (ensure-frameworks)
         (objc.runloop:shared-application)
-        (let ((controller (build-application (make-model (load-settings))))
+        (setf *password-store* (choose-password-store))
+        (let ((controller (build-application (model-load)))
               (seconds (self-test-seconds)))
           (show-window controller)
           (note "ready")

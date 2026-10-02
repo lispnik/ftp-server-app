@@ -8,11 +8,14 @@
 (defparameter +cocoa-framework+
   "/System/Library/Frameworks/Cocoa.framework/Versions/A/Cocoa")
 
+(defparameter +security-framework+
+  "/System/Library/Frameworks/Security.framework/Versions/A/Security")
+
 (defun ensure-frameworks ()
-  "Bring up the Objective-C runtime with AppKit in it.  Every entry point that
-touches AppKit calls this first; in the bundle it is also what rebuilds the
-classes defined here."
-  (objc:ensure-objc-initialized :modules (list +cocoa-framework+)))
+  "Bring up the Objective-C runtime with AppKit in it, and Security for the
+keychain.  Every entry point that touches AppKit calls this first; in the
+bundle it is also what rebuilds the classes defined here."
+  (objc:ensure-objc-initialized :modules (list +cocoa-framework+ +security-framework+)))
 
 ;;; Constants -------------------------------------------------------------------
 

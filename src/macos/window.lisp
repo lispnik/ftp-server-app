@@ -109,15 +109,22 @@ not one; the other fields are taken as they are."
            (values nil "The port must be a number from 1 to 65535.")))))
 
 (defun save-model (controller)
-  (handler-case (model-save (controller-model controller))
-    (error (condition) (note "saving settings: ~a" condition))))
+  "Save the settings.  Answers a message if something about that went wrong."
+  (handler-case
+      (if (model-save (controller-model controller))
+          nil
+          (progn (note "the keychain did not take the password")
+                 "The password could not be saved to the keychain."))
+    (error (condition)
+      (note "saving settings: ~a" condition)
+      "The settings could not be saved.")))
 
 (defun controller-changed (controller &optional message)
   "After anything changes: remember MESSAGE, redraw, and save."
-  (setf (controller-message controller) message)
+  (let ((trouble (save-model controller)))
+    (setf (controller-message controller) (or message trouble)))
   (objc:invoke (controller-table controller) "reloadData")
-  (refresh-controls controller)
-  (save-model controller))
+  (refresh-controls controller))
 
 ;;; Starting and stopping -------------------------------------------------------------
 

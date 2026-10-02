@@ -142,7 +142,7 @@
       (fs:model-add-directory model "/tmp")
       (fs:model-rename-mapping model 0 "tempdir")
       (fs:model-set-writable model 0 t)
-      (fs::model-save model file)
+      (fs:model-save model file)
       (let ((loaded (fs:make-model (fs:load-settings file))))
         (is (string= "ann" (fs:model-username loaded)))
         (is (string= "pw" (fs:model-password loaded)))
@@ -161,3 +161,73 @@
                                                 (:name "A" :path "/var" :writable nil)
                                                 (:name "b/c" :path "/var" :writable nil))))))
     (is (equal '("a") (mapping-names model)))))
+
+;;; A password kept somewhere else ----------------------------------------------------
+
+(defun memory-store (&key (password "") fail)
+  "A password store that keeps its password in a variable: (values STORE GET),
+GET a function answering what it now holds.  With FAIL it refuses to store."
+  (let ((kept password))
+    (values (fs:make-password-store
+             :fetch (lambda () kept)
+             :store (lambda (password)
+                      (when fail (error "refused"))
+                      (setf kept password)))
+            (lambda () kept))))
+
+(defmacro with-password-store ((store) &body body)
+  `(let ((fs:*password-store* ,store))
+     ,@body))
+
+(defun settings-in (directory)
+  (sb-ext:parse-native-namestring (path directory "settings.lisp")))
+
+(test with-a-store-the-password-is-not-in-the-file
+  (with-temporary-directory (directory)
+    (multiple-value-bind (store kept) (memory-store)
+      (with-password-store (store)
+        (let ((model (fs:make-model)))
+          (setf (fs:model-username model) "ann"
+                (fs:model-password model) "hunter2")
+          (is-true (fs:model-save model (settings-in directory)))
+          (is (string= "hunter2" (funcall kept)))
+          (is (null (search "hunter2" (read-file (path directory "settings.lisp")))))
+          (let ((loaded (fs:model-load (settings-in directory))))
+            (is (string= "ann" (fs:model-username loaded)))
+            (is (string= "hunter2" (fs:model-password loaded)))))))))
+
+(test a-password-left-in-the-file-is-moved-to-the-store
+  (with-temporary-directory (directory)
+    ;; Written by a version with no store.
+    (let ((model (fs:make-model)))
+      (setf (fs:model-username model) "ann"
+            (fs:model-password model) "old-secret")
+      (fs:model-save model (settings-in directory)))
+    (is (search "old-secret" (read-file (path directory "settings.lisp"))))
+    (multiple-value-bind (store kept) (memory-store)
+      (with-password-store (store)
+        (let ((loaded (fs:model-load (settings-in directory))))
+          (is (string= "old-secret" (fs:model-password loaded)))
+          (is (string= "old-secret" (funcall kept)))
+          (is (null (search "old-secret" (read-file (path directory "settings.lisp"))))
+              "and it is gone from the file"))))))
+
+(test a-store-that-refuses-does-not-put-the-password-in-the-file
+  (with-temporary-directory (directory)
+    (with-password-store ((memory-store :fail t))
+      (let ((model (fs:make-model)))
+        (setf (fs:model-username model) "ann"
+              (fs:model-password model) "hunter2")
+        (is-false (fs:model-save model (settings-in directory)))
+        (let ((text (read-file (path directory "settings.lisp"))))
+          (is (null (search "hunter2" text)))
+          (is (search "ann" text) "the rest is saved all the same"))))))
+
+(test without-a-store-the-file-has-the-password
+  (with-temporary-directory (directory)
+    (with-password-store (nil)
+      (let ((model (fs:make-model)))
+        (setf (fs:model-password model) "hunter2")
+        (is-true (fs:model-save model (settings-in directory)))
+        (is (string= "hunter2"
+                     (fs:model-password (fs:model-load (settings-in directory)))))))))

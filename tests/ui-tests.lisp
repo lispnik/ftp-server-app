@@ -245,3 +245,55 @@
     (is (eq t (getf (fs:load-settings
                      (sb-ext:parse-native-namestring (path directory "settings.lisp")))
                     :start-at-launch)))))
+
+;;; The keychain ---------------------------------------------------------------------
+;;;
+;;; Against the real login keychain, under a service name of this test's own,
+;;; which it removes.  The item is made and read by the same program, so
+;;; nothing asks the user anything.  Skipped where there is no keychain to use.
+
+(defun keychain-usable-p (service)
+  (handler-case (progn (fs::keychain-set service "probe" "probe")
+                       (fs::keychain-delete service "probe")
+                       t)
+    (error () nil)))
+
+(defmacro with-keychain ((service) &body body)
+  `(let ((,service (format nil "org.lispnik.ftp-server.test.~d.~d"
+                           (sb-posix:getpid) (random 1000000))))
+     (cond ((not (ignore-errors (fs::ensure-frameworks) t))
+            (skip "Objective-C runtime not available"))
+           ((not (keychain-usable-p ,service))
+            (skip "no keychain that can be written to"))
+           (t (unwind-protect (progn ,@body)
+                (ignore-errors (fs::keychain-delete ,service "FTP login")))))))
+
+(test the-keychain-keeps-replaces-and-forgets-a-password
+  (with-keychain (service)
+    (is (null (fs::keychain-get service "FTP login")))
+    (is-true (fs::keychain-set service "FTP login" "first"))
+    (is (string= "first" (fs::keychain-get service "FTP login")))
+    (is-true (fs::keychain-set service "FTP login" "sécond “pass” 密码"))
+    (is (string= "sécond “pass” 密码" (fs::keychain-get service "FTP login")))
+    (is-true (fs::keychain-delete service "FTP login"))
+    (is-false (fs::keychain-delete service "FTP login"))
+    (is (null (fs::keychain-get service "FTP login")))))
+
+(test the-model-saves-its-password-to-the-keychain
+  (with-keychain (service)
+    (with-temporary-directory (directory)
+      (with-password-store ((fs::keychain-password-store service))
+        (let ((model (fs:make-model)))
+          (setf (fs:model-username model) "ann"
+                (fs:model-password model) "hunter2")
+          (is-true (fs:model-save model (settings-in directory)))
+          (is (null (search "hunter2" (read-file (path directory "settings.lisp")))))
+          (is (string= "hunter2" (fs::keychain-get service "FTP login")))))
+      ;; A new store, as a new launch would have.
+      (with-password-store ((fs::keychain-password-store service))
+        (let ((loaded (fs:model-load (settings-in directory))))
+          (is (string= "hunter2" (fs:model-password loaded)))
+          ;; An empty password removes the item rather than keeping an empty one.
+          (setf (fs:model-password loaded) "")
+          (is-true (fs:model-save loaded (settings-in directory)))
+          (is (null (fs::keychain-get service "FTP login"))))))))

@@ -51,8 +51,48 @@
                                   :writable (mapping-writable mapping)))
                           (vfs-mappings (model-vfs model)))))
 
+;;; Where the password is kept --------------------------------------------------------
+
+(defstruct password-store
+  "Somewhere other than the settings file to keep the password.  FETCH is a
+function of no arguments answering it, or the empty string; STORE is a function
+of the password.  Either may signal an error."
+  fetch store)
+
+(defvar *password-store* nil
+  "NIL to keep the password in the settings file, which is what the tests and
+anything without a keychain do, or a PASSWORD-STORE to keep it there instead.")
+
 (defun model-save (model &optional (path (settings-file)))
-  (save-settings (model-settings model) path))
+  "Save the model's settings.  With a password store the password goes there
+and the file is written without one, whether or not the store took it: a
+password the keychain refused is not then left in a file instead.  Answers
+whether the password was saved."
+  (let ((settings (model-settings model))
+        (saved t))
+    (when *password-store*
+      (setf (getf settings :password) ""
+            saved (handler-case
+                      (progn (funcall (password-store-store *password-store*)
+                                      (model-password model))
+                             t)
+                    (error () nil))))
+    (save-settings settings path)
+    saved))
+
+(defun model-load (&optional (path (settings-file)))
+  "A model from the settings in PATH.  With a password store the password comes
+from there -- unless the file has one, left by a version that kept it in the
+file, which is then moved to the store and taken out of the file."
+  (let* ((settings (load-settings path))
+         (model (make-model settings)))
+    (when *password-store*
+      (if (string/= "" (getf settings :password))
+          (model-save model path)
+          (setf (model-password model)
+                (handler-case (funcall (password-store-fetch *password-store*))
+                  (error () "")))))
+    model))
 
 ;;; Mappings ---------------------------------------------------------------------
 

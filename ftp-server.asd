@@ -35,6 +35,7 @@
                 :components ((:file "frameworks")
                              (:file "main-thread")
                              (:file "bonjour")
+                             (:file "keychain")
                              (:file "window")
                              (:file "app"))))
   :in-order-to ((test-op (test-op "ftp-server/tests"))))

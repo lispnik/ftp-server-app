@@ -17,7 +17,8 @@
    #:server-port #:server-running-p #:server-session-count
    ;; Settings and the model behind the window.
    #:settings-file #:load-settings #:save-settings
-   #:model #:make-model #:model-vfs
+   #:model #:make-model #:model-load #:model-save #:model-vfs
+   #:password-store #:make-password-store #:*password-store*
    #:model-username #:model-password #:model-port #:model-allow-remote
    #:model-bonjour-name #:model-start-at-launch #:model-running-p #:model-advertise-p
    #:model-add-directory #:model-remove-mapping #:model-rename-mapping

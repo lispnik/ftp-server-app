@@ -77,8 +77,15 @@ and the log in `~/Library/Logs/FTP Server.log`.
 - **FTP is not encrypted.** The password and every file cross the network in
   the clear. Leave "Allow connections from other computers" off unless you
   trust the network.
-- **The password is stored as typed** in the settings file, which is readable
-  only by you (mode 600).
+- **The password is kept in your login keychain**, as the item
+  `org.lispnik.ftp-server`, and not in the settings file. A settings file from
+  before that, with a password in it, has it moved to the keychain the first
+  time it is read. A keychain item belongs to the application that made it, and
+  an ad hoc signature is different on each build, so after rebuilding macOS
+  asks once whether the new build may read it; a Developer ID signature avoids
+  that. When `FTP_SERVER_SETTINGS` names another settings file the password
+  stays in that file instead, unless `FTP_SERVER_KEYCHAIN` names a keychain
+  service to use.
 - **Passive mode only** (`PASV` and `EPSV`); `PORT` is refused.
 - **Transfers are binary unless the client asks for ASCII.** After `TYPE A`,
   an upload's CR LF line endings are stored as LF and a download's LF goes out
