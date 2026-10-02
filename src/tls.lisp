@@ -70,22 +70,33 @@ between, which is how clients show it."
 ;;; The application is a saved image, and SBCL opens a saved image's libraries
 ;;; again on the way up, from the paths they had in the build: Homebrew's, on
 ;;; the machine that built it.  A Mac with no Homebrew would not get as far as
-;;; a window.  The bundle has its own copy of the libraries, which
-;;; asdf-macos-app puts in Contents/Frameworks, so as the image is saved each
-;;; library's path is changed to its place there, relative to the executable,
-;;; which is a form dlopen understands.
+;;; a window.  The bundle has its own copy of the libraries, in
+;;; Contents/Frameworks, and that is the one to open.
+;;;
+;;; asdf-macos-app sees to this itself from the version that has
+;;; REPOINT-SHARED-OBJECTS, and then there is nothing to do here.  The version
+;;; ocicl.csv pins is older than that, so until the pin moves this does the
+;;; same thing for the two libraries this file is responsible for.  When it
+;;; has moved, this section can go, down to ENSURE-TLS-STATE.
 
-(defun bundle-build-p ()
-  "Whether this image is being saved as an application bundle: it is the build
-of one that has asdf-macos-app in it."
-  (and (find-package '#:asdf-macos-app) t))
+(defun builder-repoints-libraries-p ()
+  "Whether the asdf-macos-app doing this build reopens bundled libraries from
+the bundle by itself."
+  (let ((package (find-package '#:asdf-macos-app)))
+    (and package
+         (let ((symbol (find-symbol "REPOINT-SHARED-OBJECTS" package)))
+           (and symbol (fboundp symbol))))))
 
 (defun point-tls-libraries-at-bundle ()
-  "A save hook.  In a bundle build, have OpenSSL opened from the bundle."
-  (when (bundle-build-p)
+  "A save hook.  In a bundle build by an asdf-macos-app that does not do it,
+have OpenSSL opened from the bundle."
+  ;; It is the build of a bundle that has asdf-macos-app in the image.
+  (when (and (find-package '#:asdf-macos-app)
+             (not (builder-repoints-libraries-p)))
     (dolist (object sb-alien::*shared-objects*)
       (let ((name (sb-alien::shared-object-namestring object)))
-        (when (or (search "libssl" name) (search "libcrypto" name))
+        (when (and (or (search "libssl" name) (search "libcrypto" name))
+                   (not (eql 0 (search "@" name))))
           ;; By the name the file really has, which is the name it is copied
           ;; under: Homebrew's libssl.dylib is a link to libssl.4.dylib.
           (let ((leaf (file-namestring (or (ignore-errors (truename name)) name))))
