@@ -401,3 +401,105 @@ each a list of the time, the user, the address and the message."
     (let ((fs:*tls-maker* nil))
       (is-false (fs::controller-start controller))
       (is (search "TLS is required" (status controller))))))
+
+;;; Copy, Clear, tooltips, and the certificate -----------------------------------------
+
+(defun select-activity-rows (controller &rest rows)
+  (let ((indexes (objc:invoke "NSMutableIndexSet" "indexSet")))
+    (dolist (row rows)
+      (objc:invoke indexes "addIndex:" row))
+    (objc:invoke (fs::controller-activity-table controller)
+                 "selectRowIndexes:byExtendingSelection:" indexes nil)))
+
+(defun copied-messages (controller)
+  "The messages in what Copy would put on the clipboard."
+  (mapcar (lambda (line) (fourth (uiop:split-string line :separator '(#\Tab))))
+          (remove "" (uiop:split-string (fs::controller-activity-text controller)
+                                        :separator '(#\Newline))
+                  :test #'string=)))
+
+(test copy-takes-the-selected-rows-or-all-of-them
+  (with-controller (controller)
+    (fs::controller-add-activity controller "ann" #(10 0 0 1) "one")
+    (fs::controller-add-activity controller "bob" #(10 0 0 2) "two")
+    (fs::controller-add-activity controller "cat" #(10 0 0 3) "three")
+    ;; Nothing selected: everything, in the order on show.
+    (is (equal '("one" "two" "three") (copied-messages controller)))
+    (sort-activity-by controller "time" nil)
+    (is (equal '("three" "two" "one") (copied-messages controller)))
+    ;; Some selected: those, as the table has them.
+    (select-activity-rows controller 0 2)
+    (is (equal '("three" "one") (copied-messages controller)))
+    (is (search (format nil "ann~c10.0.0.1~cone" #\Tab #\Tab)
+                (fs::controller-activity-text controller)))))
+
+(test copy-puts-the-rows-on-the-clipboard
+  ;; Asked for, not run by default: it overwrites the clipboard of whoever
+  ;; runs the tests.
+  (if (not (sb-posix:getenv "FTP_SERVER_TEST_CLIPBOARD"))
+      (skip "set FTP_SERVER_TEST_CLIPBOARD to let this overwrite the clipboard")
+      (with-controller (controller)
+        (fs::controller-add-activity controller "ann" #(10 0 0 1) "copied row")
+        (objc:invoke (target controller) "copyActivity:" (cffi:null-pointer))
+        (is (search "copied row"
+                    (objc:invoke-into 'string (objc:invoke "NSPasteboard" "generalPasteboard")
+                                      "stringForType:" "public.utf8-plain-text"))))))
+
+(test clear-empties-the-activity-pane
+  (with-controller (controller)
+    (fs::controller-add-activity controller "ann" #(10 0 0 1) "one")
+    (fs::controller-add-activity controller "ann" #(10 0 0 1) "two")
+    (objc:invoke (target controller) "clearActivity:" (cffi:null-pointer))
+    (is (= 0 (objc:invoke (fs::controller-activity-table controller) "numberOfRows")))
+    (is (null (activity-rows controller)))
+    ;; And it goes on working afterwards.
+    (fs::controller-add-activity controller "ann" #(10 0 0 1) "three")
+    (is (equal '("three") (activity-messages controller)))))
+
+(test a-cell-of-the-activity-pane-has-its-whole-text-as-a-tooltip
+  (with-controller (controller)
+    (let ((long "could not upload /a/very/long/path/that/will/not/fit/in/the/column.txt: This folder is read-only")
+          (table (fs::controller-activity-table controller)))
+      (fs::controller-add-activity controller "ann" #(10 0 0 1) long)
+      (cffi:with-foreign-object (rect :double 4)
+        (flet ((tooltip (which column row)
+                 (let ((answer (objc:invoke
+                                (target controller)
+                                "tableView:toolTipForCell:rect:tableColumn:row:mouseLocation:"
+                                which (cffi:null-pointer) rect
+                                (objc:invoke which "tableColumnWithIdentifier:" column)
+                                row #(0d0 0d0))))
+                   (and (not (cffi:null-pointer-p answer))
+                        (objc:ns-string-to-string answer)))))
+          (is (string= long (tooltip table "message" 0)))
+          (is (string= "ann" (tooltip table "user" 0)))
+          (is (null (tooltip table "message" 5)) "no such row")
+          ;; The table of folders has no tooltips of this kind.
+          (fs::controller-add-directory controller "/tmp")
+          (is (null (tooltip (fs::controller-table controller) "name" 0))))))))
+
+(defun certificate-shown (controller)
+  (objc:invoke-into 'string (fs::controller-certificate-label controller) "stringValue"))
+
+(test the-window-shows-the-certificate-and-can-replace-it
+  (with-controller (controller directory)
+    (is (search "None yet" (certificate-shown controller)))
+    (is-true (objc:invoke-bool (fs::controller-certificate-button controller) "isEnabled"))
+    (is-true (fs::controller-new-certificate controller))
+    (let ((first (certificate-shown controller)))
+      ;; The fingerprint, on two lines.
+      (is (= 95 (length first)))
+      (is (= 1 (count #\Newline first)))
+      (is (string= (fs::current-certificate-fingerprint)
+                   (substitute #\: #\Newline first)))
+      (is-true (probe-file (sb-ext:parse-native-namestring (path directory "certificate.pem"))))
+      (is (search "new TLS certificate" (first (last (activity-messages controller)))))
+      (is-true (fs::controller-new-certificate controller))
+      (is (string/= first (certificate-shown controller))))
+    ;; Not while the server is running on the one it has.
+    (fill-in controller)
+    (is-true (fs::controller-start controller))
+    (is-false (objc:invoke-bool (fs::controller-certificate-button controller) "isEnabled"))
+    (let ((shown (certificate-shown controller)))
+      (objc:invoke (target controller) "newCertificate:" (cffi:null-pointer))
+      (is (string= shown (certificate-shown controller))))))

@@ -61,8 +61,15 @@ certificate. Put that in `local.mk`, which is not committed.
   address, and a message saying what they opened, listed, downloaded or
   uploaded and how large it was, what they deleted or renamed, and what they
   were refused. Click a column's header to sort by it, and again to reverse;
-  addresses sort by number. Passwords are never shown. The same lines go to
-  the log.
+  addresses sort by number. Rest the pointer on a message that has been cut
+  short to see all of it. Copy puts the selected rows on the clipboard, or all
+  of them if none is selected, with tabs between the columns; Command-C does
+  the same. Clear empties the table. Passwords are never shown. The same lines
+  go to the log.
+- **TLS certificate.** The SHA-256 fingerprint of the certificate the server
+  presents, which is what a client shows when it asks whether to trust the
+  server; it can be selected and copied. New Certificate… replaces the
+  certificate, after asking, while the server is stopped.
 
 The other settings are fixed while the server runs: stop it to change them.
 
@@ -91,8 +98,8 @@ and the log in `~/Library/Logs/FTP Server.log`.
   TLS/SSL". The certificate is one the server makes for itself the first time,
   kept beside the settings as `certificate.pem` and `private-key.pem`. Nobody
   has vouched for it, so a client will ask you to trust it; its SHA-256
-  fingerprint is in the activity pane each time the server starts, to compare
-  against. Delete the two files to have a new one made.
+  fingerprint is in the window, and in the activity pane each time the server
+  starts, to compare against. New Certificate… in the window makes another.
 - **TLS uses OpenSSL**, through cl+ssl. The build needs Homebrew's
   (`brew install openssl`); the bundle carries its own copy and uses that one.
 - **The password is kept in your login keychain**, as the item

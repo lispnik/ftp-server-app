@@ -275,3 +275,15 @@ GET a function answering what it now holds.  With FAIL it refuses to store."
       (is (equal '(4 3 2 1) (order "message" nil)))
       ;; And the list it was given is as it was.
       (is (equal '(3 1 4 2) (mapcar #'fs::activity-entry-sequence entries))))))
+
+(test activity-is-copied-as-lines-of-tab-separated-columns
+  (let ((text (fs::activity-text (list (entry 1 "ann" #(10 0 0 1) "logged in")
+                                       (entry 2 nil nil "server stopped")))))
+    (destructuring-bind (first second) (remove "" (uiop:split-string text :separator '(#\Newline))
+                                               :test #'string=)
+      (is (equal '("ann" "10.0.0.1" "logged in")
+                 (rest (uiop:split-string first :separator '(#\Tab)))))
+      (is (equal '("-" "-" "server stopped")
+                 (rest (uiop:split-string second :separator '(#\Tab)))))
+      (is (= 4 (length (uiop:split-string first :separator '(#\Tab)))))))
+  (is (string= "" (fs::activity-text '()))))

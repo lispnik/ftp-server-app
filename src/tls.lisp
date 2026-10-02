@@ -57,6 +57,22 @@ client is shown its fingerprint, or told to trust it, the first time."
       (generate-certificate certificate key))
     (values certificate key)))
 
+(defun regenerate-certificate (&optional (directory (settings-directory)))
+  "Throw the certificate and its key away and make new ones.  Every client
+that trusted the old certificate will be asked about the new one."
+  (multiple-value-bind (certificate key) (certificate-files directory)
+    (dolist (file (list certificate key))
+      (when (probe-file file)
+        (delete-file file)))
+    (generate-certificate certificate key)))
+
+(defun current-certificate-fingerprint (&optional (directory (settings-directory)))
+  "The fingerprint of the certificate in DIRECTORY, or NIL if there is none
+yet or it cannot be read."
+  (let ((certificate (certificate-files directory)))
+    (and (probe-file certificate)
+         (ignore-errors (certificate-fingerprint certificate)))))
+
 (defun certificate-fingerprint (certificate)
   "The SHA-256 fingerprint of CERTIFICATE, as pairs of hex digits with colons
 between, which is how clients show it."

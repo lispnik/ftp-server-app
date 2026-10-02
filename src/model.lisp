@@ -342,3 +342,14 @@ same second are still one before the other, and turn round with the rest."
                       (lambda (a b) (funcall before b a)))))
     (stable-sort (sort (copy-list entries) #'< :key #'activity-entry-sequence)
                  ordered)))
+
+(defun activity-text (entries)
+  "ENTRIES as text to paste somewhere: a line each, the columns with tabs
+between, which is what a spreadsheet wants."
+  (format nil "~{~a~%~}"
+          (mapcar (lambda (entry)
+                    (format nil "~{~a~^~c~}"
+                            (loop for (column . more) on *activity-columns*
+                                  collect (activity-cell entry column)
+                                  when more collect #\Tab)))
+                  entries)))

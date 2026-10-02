@@ -17,6 +17,8 @@
    (remote-checkbox :initform nil :accessor controller-remote-checkbox)
    (launch-checkbox :initform nil :accessor controller-launch-checkbox)
    (tls-checkbox :initform nil :accessor controller-tls-checkbox)
+   (certificate-label :initform nil :accessor controller-certificate-label)
+   (certificate-button :initform nil :accessor controller-certificate-button)
    (activity-table :initform nil :accessor controller-activity-table)
    (activity :initform '() :accessor controller-activity
              :documentation "The activity pane's entries, newest first.")
@@ -76,8 +78,65 @@ may log in are fixed while it runs; the folders are not."
                            (controller-remote-checkbox controller)
                            (controller-tls-checkbox controller)))
       (objc:invoke control "setEnabled:" (not running)))
+    ;; A server that is running is serving the certificate it started with.
+    (objc:invoke (controller-certificate-button controller) "setEnabled:" (not running))
+    (objc:invoke (controller-certificate-label controller) "setStringValue:"
+                 (certificate-text))
     (objc:invoke (controller-remove-button controller) "setEnabled:"
                  (>= (objc:invoke table "selectedRow") 0))))
+
+;;; The certificate ---------------------------------------------------------------
+
+(defun split-fingerprint (fingerprint)
+  "FINGERPRINT on two lines, broken between two of its octets, so that it fits
+beside its button."
+  (let ((middle (position #\: fingerprint :start (floor (length fingerprint) 2))))
+    (if middle
+        (format nil "~a~%~a" (subseq fingerprint 0 middle) (subseq fingerprint (1+ middle)))
+        fingerprint)))
+
+(defun certificate-text ()
+  "What the window says of the certificate: its fingerprint, which is what a
+client shows when it asks whether to trust the server."
+  (let ((fingerprint (current-certificate-fingerprint)))
+    (if fingerprint
+        (split-fingerprint fingerprint)
+        (format nil "None yet.~%One is made the first time the server starts."))))
+
+(defun controller-new-certificate (controller)
+  "Replace the certificate, unasked.  Answers true if it was replaced."
+  (handler-case
+      (progn (regenerate-certificate)
+             (controller-add-activity controller nil nil
+                                      (format nil "new TLS certificate, SHA-256 fingerprint ~a"
+                                              (current-certificate-fingerprint)))
+             (controller-changed controller)
+             t)
+    (error (condition)
+      (note "new certificate: ~a" condition)
+      (controller-changed controller "A new certificate could not be made.")
+      nil)))
+
+(defun confirm (message detail button)
+  "Ask with an alert.  True if BUTTON, rather than Cancel, was pressed."
+  (let ((alert (objc:invoke (objc:invoke "NSAlert" "alloc") "init")))
+    (unwind-protect
+         (progn
+           (objc:invoke alert "setMessageText:" message)
+           (objc:invoke alert "setInformativeText:" detail)
+           (objc:invoke alert "addButtonWithTitle:" button)
+           (objc:invoke alert "addButtonWithTitle:" "Cancel")
+           ;; NSAlertFirstButtonReturn.
+           (= 1000 (objc:invoke alert "runModal")))
+      (objc:release alert))))
+
+(define-controller-method ("newCertificate:" :void) ((sender objc:objc-object-pointer))
+  (unless (model-running-p (controller-model self))
+    (when (or (null (current-certificate-fingerprint))
+              (confirm "Make a new TLS certificate?"
+                       "Every client that trusted the present certificate will be asked to trust the new one."
+                       "New Certificate"))
+      (controller-new-certificate self))))
 
 (defun show-model (controller)
   "Put the model's settings into the fields."
@@ -181,6 +240,59 @@ NIL; ADDRESS is where the client is, or NIL for something the server itself did.
             (subseq (controller-activity controller) 0 *activity-limit*)))
     (show-activity controller)
     entry))
+
+(defun controller-clear-activity (controller)
+  (setf (controller-activity controller) '())
+  (show-activity controller))
+
+(defun selected-activity (controller)
+  "The entries of the selected rows of the activity pane, in the order shown;
+or of every row, if none is selected."
+  (let* ((table (controller-activity-table controller))
+         (rows (controller-activity-rows controller))
+         (indexes (objc:invoke table "selectedRowIndexes"))
+         (selected (loop for index = (objc:invoke indexes "firstIndex")
+                           then (objc:invoke indexes "indexGreaterThanIndex:" index)
+                         until (or (= index cocoa:ns-not-found) (>= index (length rows)))
+                         collect (aref rows index))))
+    (or selected (coerce rows 'list))))
+
+(defun controller-activity-text (controller)
+  "What Copy puts on the clipboard."
+  (activity-text (selected-activity controller)))
+
+(defun copy-to-clipboard (string)
+  (let ((pasteboard (objc:invoke "NSPasteboard" "generalPasteboard")))
+    (objc:invoke pasteboard "clearContents")
+    (objc:invoke pasteboard "setString:forType:" string "public.utf8-plain-text")))
+
+(define-controller-method ("clearActivity:" :void) ((sender objc:objc-object-pointer))
+  (controller-clear-activity self))
+
+(define-controller-method ("copyActivity:" :void) ((sender objc:objc-object-pointer))
+  (copy-to-clipboard (controller-activity-text self)))
+
+;;; Copy from the Edit menu, or Command-C.  The window's delegate is asked
+;;; after the window itself, so this is reached only when nothing with a
+;;; selection of its own -- a field being typed in -- has taken it.
+(define-controller-method ("copy:" :void) ((sender objc:objc-object-pointer))
+  (copy-to-clipboard (controller-activity-text self)))
+
+;;; A message too long for its column is cut short with an ellipsis; resting
+;;; the pointer on it shows the whole of it.
+(define-controller-method ("tableView:toolTipForCell:rect:tableColumn:row:mouseLocation:"
+                           objc:objc-object-pointer
+                           :on-error (cffi:null-pointer))
+    ((table objc:objc-object-pointer)
+     (cell objc:objc-object-pointer)
+     (rect (:pointer :void))
+     (column objc:objc-object-pointer)
+     (row :long)
+     (location cocoa:ns-point))
+  (let ((rows (controller-activity-rows self)))
+    (if (and (activity-table-p self table) (< -1 row (length rows)))
+        (objc:string-to-ns-string (activity-cell (aref rows row) (column-key column)) t)
+        (cffi:null-pointer))))
 
 (defun controller-server-event (controller event arguments)
   "On the main thread, for something a server thread said."
@@ -444,7 +556,8 @@ controller is the data source of both."
     (add-column table "path" "Folder on This Mac" 280d0 :resizing 3)
     (add-column table "writable" "Writable" 70d0 :editable t :checkbox t)
     (objc:invoke table "setUsesAlternatingRowBackgroundColors:" t)
-    (objc:invoke table "setAllowsMultipleSelection:" nil)
+    ;; Several rows at once, for Copy.
+    (objc:invoke table "setAllowsMultipleSelection:" t)
     (objc:invoke table "setColumnAutoresizingStyle:" 1)
     (objc:invoke table "setDataSource:" target)
     (objc:invoke table "setDelegate:" target)
@@ -459,8 +572,17 @@ controller is the data source of both."
     (objc:release scroll)
     table))
 
+(defun add-small-button (content title action frame mask target)
+  "A button of the small size, for beside a label."
+  (let ((button (add-button content title action frame mask target)))
+    (objc:invoke button "setControlSize:" 1)
+    (objc:invoke button "setFont:"
+                 (objc:invoke "NSFont" "systemFontOfSize:"
+                              (objc:invoke "NSFont" "smallSystemFontSize")))
+    button))
+
 (defparameter +window-width+ 680d0)
-(defparameter +window-height+ 740d0)
+(defparameter +window-height+ 782d0)
 (defparameter +activity-height+ 156d0)
 
 (defun add-checkbox (content title frame mask target)
@@ -528,7 +650,9 @@ is what grows when the window does."
     ;; Or the close button frees a window this still points at.
     (objc:invoke window "setReleasedWhenClosed:" nil)
     (objc:invoke window "setTitle:" "FTP Server")
-    (objc:invoke window "setContentMinSize:" #(560d0 600d0))
+    (objc:invoke window "setContentMinSize:" #(600d0 640d0))
+    ;; For Copy, which reaches the window's delegate by the responder chain.
+    (objc:invoke window "setDelegate:" target)
     (setf (controller-window controller) window)
     (flet ((labelled-field (label class width)
              (add-label content label (vector 20d0 (+ y 3d0) 100d0 17d0) top)
@@ -553,7 +677,23 @@ is what grows when the window does."
             (controller-tls-checkbox controller)
             (checkbox "Require TLS: refuse clients that do not encrypt")
             (controller-launch-checkbox controller)
-            (checkbox "Start serving when FTP Server opens")))
+            (checkbox "Start serving when FTP Server opens"))
+      ;; The certificate: its fingerprint on two lines, which can be selected
+      ;; and copied, and the button that replaces it.
+      (decf y 14d0)
+      (add-label content "TLS certificate:" (vector 20d0 (+ y 10d0) 100d0 17d0) top)
+      (let ((label (objc:invoke "NSTextField" "wrappingLabelWithString:" "")))
+        (objc:invoke label "setFrame:" (vector 126d0 (- y 4d0) 360d0 30d0))
+        (objc:invoke label "setAutoresizingMask:" top)
+        (objc:invoke label "setFont:"
+                     (objc:invoke "NSFont" "monospacedSystemFontOfSize:weight:" 10d0 0d0))
+        (objc:invoke content "addSubview:" label)
+        (setf (controller-certificate-label controller) label))
+      (setf (controller-certificate-button controller)
+            (add-button content "New Certificate…" "newCertificate:"
+                        (vector (- +window-width+ 174d0) y 160d0 32d0)
+                        (logior +flexible-left+ top) target))
+      (decf y 28d0))
 
     ;; From the bottom up.
     (setf (controller-status-label controller)
@@ -572,6 +712,12 @@ is what grows when the window does."
                                       "time" t)))
     (let ((above-activity (+ 56d0 +activity-height+)))
       (add-label content "Activity:" (vector 20d0 (+ above-activity 6d0) 300d0 17d0) bottom)
+      (add-small-button content "Copy" "copyActivity:"
+                        (vector (- +window-width+ 162d0) (+ above-activity 1d0) 70d0 26d0)
+                        (logior +flexible-left+ bottom) target)
+      (add-small-button content "Clear" "clearActivity:"
+                        (vector (- +window-width+ 88d0) (+ above-activity 1d0) 70d0 26d0)
+                        (logior +flexible-left+ bottom) target)
       (add-button content "Add…" "addMapping:"
                   (vector 14d0 (+ above-activity 28d0) 90d0 32d0) bottom target)
       (setf (controller-remove-button controller)

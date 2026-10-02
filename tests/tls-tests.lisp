@@ -278,3 +278,18 @@ server made for itself, so there is nothing to check it against."
                  (is (= 230 (login client))))))
         (fs:model-stop model)
         (setf fs::*login-failure-delay* delay)))))
+
+(test a-certificate-can-be-replaced
+  (with-temporary-directory (directory)
+    (let ((pathname (sb-ext:parse-native-namestring (concatenate 'string directory "/"))))
+      (is (null (fs::current-certificate-fingerprint pathname)) "none to begin with")
+      (fs::ensure-certificate pathname)
+      (let ((before (fs::current-certificate-fingerprint pathname)))
+        (is (= 95 (length before)))
+        (fs::regenerate-certificate pathname)
+        (let ((after (fs::current-certificate-fingerprint pathname)))
+          (is (= 95 (length after)))
+          (is (string/= before after))
+          ;; And the new key is as private as the old.
+          (is (= #o600 (logand #o777 (sb-posix:stat-mode
+                                      (sb-posix:stat (path directory "private-key.pem")))))))))))
