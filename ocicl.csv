@@ -1,5 +1,5 @@
 alexandria, ghcr.io/ocicl/alexandria@sha256:407634b0781b2d8fc3e55a30432bcb5d0c042af2feb2d1d72de825940b0fb0df, alexandria-20260812-f283e25/alexandria.asd
-asdf-macos-app, ghcr.io/ocicl/asdf-macos-app@sha256:1ad1193680110489dcc262994a032bb19dc79ea038eb6e23473fa879647d4259, asdf-macos-app-20260913-bcd2c6e/asdf-macos-app.asd
+asdf-macos-app, ghcr.io/ocicl/asdf-macos-app@sha256:431aa3c6ddbfd4a3cbf9cfd63501e560808175d8ac3398bead5a294c7afb4789, asdf-macos-app-20261002-670c893/asdf-macos-app.asd
 babel, ghcr.io/ocicl/babel@sha256:9d9fcde71acc2b5c39572de4f11756a08c1d8801caa86c581b85dabaa35928b3, babel-20250905-4eaf3f2/babel.asd
 babel-streams, ghcr.io/ocicl/babel@sha256:9d9fcde71acc2b5c39572de4f11756a08c1d8801caa86c581b85dabaa35928b3, babel-20250905-4eaf3f2/babel-streams.asd
 babel-tests, ghcr.io/ocicl/babel@sha256:9d9fcde71acc2b5c39572de4f11756a08c1d8801caa86c581b85dabaa35928b3, babel-20250905-4eaf3f2/babel-tests.asd

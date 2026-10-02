@@ -93,6 +93,10 @@ and the log in `~/Library/Logs/FTP Server.log`.
   accepts it: the password and every file then cross the network in the clear.
   Tick it before allowing connections from other computers on a network you do
   not trust.
+- **A data connection can resume the control connection's TLS session**, which
+  is how a client knows the data connection is its own; FileZilla warns of a
+  server that will not allow it. It is allowed, not demanded: a client that
+  does not resume is still served.
 - **TLS is explicit FTP over TLS** (`AUTH TLS`, then `PROT P` for the data),
   TLS 1.2 and later, which is what clients call "FTPS (explicit)" or "FTP with
   TLS/SSL". The certificate is one the server makes for itself the first time,
@@ -101,7 +105,8 @@ and the log in `~/Library/Logs/FTP Server.log`.
   fingerprint is in the window, and in the activity pane each time the server
   starts, to compare against. New Certificate… in the window makes another.
 - **TLS uses OpenSSL**, through cl+ssl. The build needs Homebrew's
-  (`brew install openssl`); the bundle carries its own copy and uses that one.
+  (`brew install openssl`); the bundle carries its own copy and uses that one,
+  which asdf-macos-app arranges as it saves the image.
 - **The password is kept in your login keychain**, as the item
   `org.lispnik.ftp-server`, and not in the settings file. A settings file from
   before that, with a password in it, has it moved to the keychain the first
