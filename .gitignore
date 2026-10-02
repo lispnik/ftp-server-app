@@ -1,0 +1,5 @@
+build/
+*.fasl
+.DS_Store
+/ocicl/
+/local.mk
