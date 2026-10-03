@@ -1,8 +1,11 @@
 ;;;; vfs.lisp -- the virtual filesystem an FTP client sees.
 ;;;;
 ;;;; The root is not a directory on this host.  It is a list of MAPPINGS, each
-;;;; a name and the host directory that name stands for: map /tmp as "tempdir"
-;;;; and a client that lists / sees tempdir, and inside it what /tmp holds.
+;;;; a name and what that name stands for: map /tmp as "tempdir" and a client
+;;;; that lists / sees tempdir, and inside it what /tmp holds.  What a mapping
+;;;; holds is its BACKEND's business (backend.lisp): a directory on this host,
+;;;; which is the usual thing and what everything in this file is about, or
+;;;; files and directories made by Lisp as they are asked for.
 ;;;;
 ;;;; Virtual paths are lists of components, so "/tempdir/a" is ("tempdir" "a")
 ;;;; and the root is ().  Host paths are native namestrings -- strings, never
@@ -30,10 +33,18 @@
 
 ;;; Mappings --------------------------------------------------------------------
 
-(defstruct (mapping (:constructor %make-mapping (name host-path writable)))
+(defstruct (mapping (:constructor %make-mapping (name host-path writable
+                                                  &optional backend)))
   (name "" :type string)
   (host-path "" :type string)
-  (writable nil))
+  (writable nil)
+  ;; NIL for a directory on this host, at HOST-PATH; otherwise the backend
+  ;; that makes what the mapping holds.
+  (backend nil))
+
+(defun host-mapping-p (mapping)
+  "Whether MAPPING is a directory on this host."
+  (null (mapping-backend mapping)))
 
 (defclass vfs ()
   ((mappings :initform '() :accessor %vfs-mappings)
@@ -83,6 +94,15 @@ not tell them apart."
   (with-vfs-lock (vfs)
     (check-mapping-name vfs name)
     (let ((mapping (%make-mapping name host-path (and writable t))))
+      (setf (%vfs-mappings vfs) (append (%vfs-mappings vfs) (list mapping)))
+      mapping)))
+
+(defun vfs-add-backend (vfs name backend &key writable)
+  "Map NAME to what BACKEND makes.  Answers the mapping, or signals
+MAPPING-ERROR."
+  (with-vfs-lock (vfs)
+    (check-mapping-name vfs name)
+    (let ((mapping (%make-mapping name "" (and writable t) backend)))
       (setf (%vfs-mappings vfs) (append (%vfs-mappings vfs) (list mapping)))
       mapping)))
 
@@ -183,24 +203,28 @@ The mapped directory is itself resolved first, each time: /tmp is a link to
 Signals VFS-NOT-FOUND or VFS-DENIED."
   (if (null components)
       (values :root nil nil)
-      (let* ((mapping (or (vfs-find vfs (first components))
-                          (error 'vfs-not-found)))
-             (root-real (or (real-path (mapping-host-path mapping))
-                            (error 'vfs-not-found
-                                   :message "The mapped directory is not available.")))
-             (rest (rest components)))
-        (flet ((contained (candidate)
-                 (let ((real (or (real-path candidate) (error 'vfs-not-found))))
-                   (unless (path-within-p real root-real)
-                     (error 'vfs-denied))
-                   real)))
-          (cond ((null rest)
-                 (values :mapping-root mapping root-real))
-                ((eq intent :existing)
-                 (values :inside mapping
-                         (contained (apply #'join-host-path root-real rest))))
-                (t
-                 (let ((parent (contained (apply #'join-host-path root-real
-                                                 (butlast rest)))))
-                   (values :inside mapping
-                           (join-host-path parent (first (last rest)))))))))))
+      (let ((mapping (or (vfs-find vfs (first components))
+                         (error 'vfs-not-found)))
+            (rest (rest components)))
+        (values (if rest :inside :mapping-root)
+                mapping
+                (and (host-mapping-p mapping)
+                     (host-path-in mapping rest :intent intent))))))
+
+(defun host-path-in (mapping rest &key (intent :existing))
+  "Where REST, the components after MAPPING's name, is on this host, by the
+rules RESOLVE describes.  Signals VFS-NOT-FOUND or VFS-DENIED."
+  (let ((root-real (or (real-path (mapping-host-path mapping))
+                       (error 'vfs-not-found
+                              :message "The mapped directory is not available."))))
+    (flet ((contained (candidate)
+             (let ((real (or (real-path candidate) (error 'vfs-not-found))))
+               (unless (path-within-p real root-real)
+                 (error 'vfs-denied))
+               real)))
+      (cond ((null rest) root-real)
+            ((eq intent :existing)
+             (contained (apply #'join-host-path root-real rest)))
+            (t
+             (join-host-path (contained (apply #'join-host-path root-real (butlast rest)))
+                             (first (last rest))))))))

@@ -52,11 +52,13 @@ the certificate in use.")
         :bonjour-name (model-bonjour-name model)
         :start-at-launch (model-start-at-launch model)
         :require-tls (model-require-tls model)
-        :mappings (mapcar (lambda (mapping)
-                            (list :name (mapping-name mapping)
-                                  :path (mapping-host-path mapping)
-                                  :writable (mapping-writable mapping)))
-                          (vfs-mappings (model-vfs model)))))
+        ;; Only folders.  What init.lisp defines it defines again at each
+        ;; launch, and a function cannot be written to a file.
+        :mappings (loop for mapping in (vfs-mappings (model-vfs model))
+                        when (host-mapping-p mapping)
+                          collect (list :name (mapping-name mapping)
+                                        :path (mapping-host-path mapping)
+                                        :writable (mapping-writable mapping)))))
 
 ;;; Where the password is kept --------------------------------------------------------
 
@@ -353,3 +355,54 @@ between, which is what a spreadsheet wants."
                                   collect (activity-cell entry column)
                                   when more collect #\Tab)))
                   entries)))
+
+;;; init.lisp ---------------------------------------------------------------------------
+;;;
+;;; Lisp, loaded when the application starts, from beside the settings.  It is
+;;; how a mapping made by Lisp gets into the application: the window can only
+;;; choose folders.  It is code, and it runs as you, with everything you can
+;;; do -- the same as a shell's startup file.
+
+(defvar *init-mappings* '()
+  "What DEFINE-LISP-MAPPING has been told during this load of init.lisp,
+newest first.")
+
+(defun define-lisp-mapping (name root &key writable (description "(made by init.lisp)"))
+  "In init.lisp: map NAME to the tree whose root is the LISP-DIRECTORY ROOT.
+WRITABLE lets clients upload to the directories in it that take uploads."
+  (check-type root lisp-directory)
+  (push (list name root writable description) *init-mappings*)
+  name)
+
+(defun init-file ()
+  "Where init.lisp is: beside the settings file."
+  (merge-pathnames "init.lisp" (settings-directory)))
+
+(defun load-init-file (&optional (path (init-file)))
+  "Load init.lisp, if there is one.  Answers (values MAPPINGS PROBLEM):
+MAPPINGS each (NAME ROOT WRITABLE DESCRIPTION) in the order they were
+defined, and PROBLEM a sentence if loading it went wrong.  What was defined
+before an error is kept."
+  (let ((*init-mappings* '()))
+    (if (not (probe-file path))
+        (values '() nil)
+        (handler-case
+            (let ((*package* (find-package '#:ftp-server))
+                  (*read-eval* t))
+              (load path :external-format :utf-8 :verbose nil :print nil)
+              (values (reverse *init-mappings*) nil))
+          (error (condition)
+            (values (reverse *init-mappings*)
+                    (format nil "init.lisp: ~a" condition)))))))
+
+(defun model-add-lisp-mappings (model mappings)
+  "Add MAPPINGS, as LOAD-INIT-FILE answers them, to MODEL.  Answers a sentence
+for each one, saying what became of it."
+  (loop for (name root writable description) in mappings
+        collect (handler-case
+                    (progn (vfs-add-lisp (model-vfs model) name root
+                                         :writable writable :description description)
+                           (format nil "init.lisp mapped ~a" name))
+                  (mapping-error (condition)
+                    (format nil "init.lisp could not map ~a: ~a"
+                            name (mapping-error-message condition))))))

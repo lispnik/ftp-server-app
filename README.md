@@ -90,6 +90,63 @@ dns-sd -B _ftp._tcp                                                   # the Bonj
 Settings are kept in `~/Library/Application Support/FTP Server/settings.lisp`
 and the log in `~/Library/Logs/FTP Server.log`.
 
+## Files and directories made by Lisp
+
+A mapping need not be a folder. `init.lisp`, beside the settings in
+`~/Library/Application Support/FTP Server/`, is loaded each time the
+application starts, and can map names to files and directories that Lisp
+makes as they are asked for:
+
+```lisp
+(define-lisp-mapping "status"
+  (lisp-directory "status"
+    (list
+     ;; Made again each time it is listed or read.
+     (lisp-file "uptime.txt"
+                (lambda () (format nil "up ~d seconds~%"
+                                   (floor (get-internal-real-time)
+                                          internal-time-units-per-second))))
+     ;; A string is sent as UTF-8; a vector of octets as it is.
+     (lisp-file "motd.txt" (format nil "Welcome.~%"))
+     ;; A directory whose children are made each time it is looked into.
+     (lisp-directory "squares"
+                     (lambda ()
+                       (loop for n from 1 to 5
+                             collect (lisp-file (format nil "~d.txt" n)
+                                                (format nil "~d~%" (* n n)))))))))
+
+(define-lisp-mapping "dropbox"
+  ;; Uploads here are handed to the function, whole, once they have arrived.
+  (lisp-directory "dropbox" '()
+                  :on-upload (lambda (name octets)
+                               (format t "~a: ~d octets~%" name (length octets))))
+  :writable t)
+```
+
+- `(lisp-file name content &key mtime)` — `content` is a string, a vector of
+  octets, or a function of no arguments returning one, called each time the
+  file is listed or read. A listing shows a file's size, so its function runs
+  for a listing too.
+- `(lisp-directory name children &key mtime on-upload)` — `children` is a list
+  of nodes, or a function returning one, called each time the directory is
+  looked into. With `on-upload`, a function of the file's name and its octets,
+  the directory takes uploads when its mapping is writable. Uploads are whole:
+  `APPE` and resuming are refused.
+- `(define-lisp-mapping name root &key writable description)` — `description`
+  is what the window shows in place of a folder.
+
+Nothing in a Lisp mapping can be deleted, made or renamed. Downloads, `REST`,
+ASCII mode, TLS and the activity log work as they do for folders. What a
+function signals is the client's 550, with the error as its reason, and the
+server goes on; in a listing, a file that cannot be made is left out.
+Functions run on the server's threads, one per client, so anything they share
+they must lock.
+
+Lisp mappings appear in the window's table and are not saved with the folders:
+`init.lisp` makes them again at the next launch. What it did, and any error in
+it, is in the activity pane. `init.lisp` is code and runs as you, as a shell's
+startup file does.
+
 ## What to know before using it
 
 - **Plain FTP is not encrypted**, and unless "Require TLS" is ticked the server
@@ -138,6 +195,8 @@ ftp-server.asd       ftp-server/core, ftp-server/tls, ftp-server, ftp-server/tes
 ftp-server-app.asd   the bundle
 src/                 the server; no Objective-C, depends only on SBCL's contribs
   vfs.lisp           mappings, virtual paths, staying inside a mapping
+  backend.lisp       what a mapping holds, as generic functions; folders on this host
+  lisp-backend.lisp  files and directories made by Lisp
   listing.lisp       LIST and MLSD lines
   net.lisp           sockets and CRLF lines
   server.lisp        the listener and its threads

@@ -15,6 +15,8 @@
                 :components ((:file "package")
                              (:file "vfs")
                              (:file "listing")
+                             (:file "backend")
+                             (:file "lisp-backend")
                              (:file "net")
                              (:file "server")
                              (:file "protocol")
@@ -61,6 +63,7 @@
                              (:file "protocol-tests")
                              (:file "server-tests")
                              (:file "tls-tests")
+                             (:file "lisp-backend-tests")
                              (:file "model-tests")
                              (:file "ui-tests"))))
   ;; FIVEAM:RUN! prints failures but returns NIL, and ASDF discards what a

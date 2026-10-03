@@ -207,18 +207,14 @@ and answer the reply that ends the transfer."
 
 (defun entries-for-listing (session argument)
   "The entries a listing of ARGUMENT shows: a directory's, or a file's own."
-  (multiple-value-bind (kind mapping host-path components)
-      (resolve-existing session argument)
-    (ecase kind
-      (:root (root-entries (session-vfs session)))
-      ((:mapping-root :inside)
-       (if (eq :directory (host-file-type host-path))
-           (list-directory host-path
-                           :root-real (real-path (mapping-host-path mapping))
-                           :writable (mapping-writable mapping))
-           (list (or (host-entry (first (last components)) host-path
-                                 :writable (mapping-writable mapping))
-                     (error 'vfs-not-found))))))))
+  (multiple-value-bind (mapping rest) (locate session argument)
+    (if (null mapping)
+        (root-entries (session-vfs session))
+        (let* ((backend (backend-of mapping))
+               (entry (backend-entry backend mapping rest)))
+          (if (eq :directory (entry-type entry))
+              (backend-list backend mapping rest)
+              (list entry))))))
 
 (defun send-listing (session argument line-function)
   (let ((entries (entries-for-listing session argument)))
@@ -326,28 +322,13 @@ called with how much each piece put in the file."
       (write-byte +cr+ to)
       (funcall count 1))))
 
-(defun open-host-file (host-path flags &optional (mode #o644))
-  "A stream of octets on HOST-PATH, opened with FLAGS and never through a
-symbolic link."
-  (let ((fd (sb-posix:open host-path (logior flags sb-posix:o-nofollow) mode)))
-    (sb-sys:make-fd-stream fd
-                           :input (not (logtest flags (logior sb-posix:o-wronly
-                                                              sb-posix:o-rdwr)))
-                           :output (logtest flags (logior sb-posix:o-wronly
-                                                          sb-posix:o-rdwr))
-                           :element-type '(unsigned-byte 8)
-                           :buffering :full
-                           :auto-close t)))
-
 (define-command "RETR" (session argument)
   (require-argument argument)
-  (multiple-value-bind (kind mapping host-path) (resolve-existing session argument)
-    (declare (ignore mapping))
-    (unless (and (eq kind :inside) (eq :file (host-file-type host-path)))
+  (multiple-value-bind (mapping rest) (locate session argument)
+    (unless (and mapping rest)
       (error 'vfs-error :message "Not a plain file."))
     (let ((offset (session-rest-offset session)))
-      ;; HOST-PATH is already a real path, so there is no link left to follow.
-      (with-open-stream (file (open-host-file host-path sb-posix:o-rdonly))
+      (with-open-stream (file (backend-open-input (backend-of mapping) mapping rest))
         (when (plusp offset)
           (file-position file offset))
         (call-with-data-connection
@@ -359,35 +340,37 @@ symbolic link."
                     file stream (session-counter session))))))))
 
 (defun store-file (session argument append)
-  (multiple-value-bind (mapping host-path) (resolve-for-change session argument)
-    (declare (ignore mapping))
-    (when (member (host-file-type host-path) '(:directory :symlink :other))
-      (error 'vfs-denied))
-    ;; Before the file is opened, which is when it is emptied.
-    (unless (session-passive session)
-      (return-from store-file (values 425 "Use PASV or EPSV first.")))
-    (let* ((offset (session-rest-offset session))
-           (flags (logior sb-posix:o-wronly sb-posix:o-creat
-                          (cond (append sb-posix:o-append)
-                                ((plusp offset) 0)
-                                (t sb-posix:o-trunc))))
-           (file (open-host-file host-path flags)))
-      (unwind-protect
-           (progn
-             (when (and (plusp offset) (not append))
-               (file-position file offset))
-             (call-with-data-connection
-              session
-              (lambda (stream)
-                (handler-case (progn
-                                (funcall (if (eq :ascii (session-transfer-type session))
-                                             #'copy-octets-from-ascii
-                                             #'copy-octets)
-                                         stream file (session-counter session))
-                                (finish-output file))
-                  ;; The disk, not the connection: still an aborted transfer.
-                  (file-error () (error 'transfer-failed))))))
-        (ignore-errors (close file))))))
+  (multiple-value-bind (mapping rest) (locate-for-change session argument)
+    (let ((backend (backend-of mapping))
+          (offset (session-rest-offset session)))
+      (backend-check-output backend mapping rest :append append :offset offset)
+      ;; Before the file is opened, which is when it is emptied.
+      (unless (session-passive session)
+        (return-from store-file (values 425 "Use PASV or EPSV first.")))
+      (multiple-value-bind (file finish)
+          (backend-open-output backend mapping rest :append append :offset offset)
+        (let ((code nil) (text nil) (finished nil))
+          (unwind-protect
+               (progn
+                 (multiple-value-setq (code text)
+                   (call-with-data-connection
+                    session
+                    (lambda (stream)
+                      (handler-case (progn
+                                      (funcall (if (eq :ascii (session-transfer-type session))
+                                                   #'copy-octets-from-ascii
+                                                   #'copy-octets)
+                                               stream file (session-counter session))
+                                      (finish-output file))
+                        ;; The disk, not the connection: still an aborted transfer.
+                        (file-error () (error 'transfer-failed))))))
+                 ;; Told whether all of it came, and allowed to object: a
+                 ;; backend that hands the upload to Lisp hears of it here.
+                 (setf finished t)
+                 (funcall finish (eql code 226)))
+            (unless finished
+              (ignore-errors (funcall finish nil))))
+          (values code text))))))
 
 (define-command "STOR" (session argument)
   (store-file session argument nil))

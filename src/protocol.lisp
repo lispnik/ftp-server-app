@@ -107,39 +107,37 @@ link put out of reach."
   (unless (and argument (plusp (length argument)))
     (error 'vfs-error :message "A path is required.")))
 
-(defun resolve-existing (session argument)
-  "Resolve ARGUMENT for reading: (values KIND MAPPING HOST-PATH COMPONENTS)."
+(defun locate (session argument)
+  "Where ARGUMENT is: (values MAPPING REST COMPONENTS).  MAPPING is NIL for the
+root; REST is the components after the mapping's name.  Signals VFS-NOT-FOUND
+for a mapping there is none of."
   (let ((components (session-path session argument)))
-    (multiple-value-bind (kind mapping host-path)
-        (resolve (session-vfs session) components :intent :existing)
-      (values kind mapping host-path components))))
+    (if (null components)
+        (values nil '() components)
+        (values (or (vfs-find (session-vfs session) (first components))
+                    (error 'vfs-not-found))
+                (rest components)
+                components))))
 
-(defun resolve-for-change (session argument)
-  "Resolve ARGUMENT as something to create, remove or rename:
-(values MAPPING HOST-PATH COMPONENTS).  Refuses the root, a mapping itself,
-and anything in a mapping that is not writable."
+(defun locate-for-change (session argument)
+  "Where ARGUMENT is, as something to create, remove or rename: (values
+MAPPING REST COMPONENTS).  Refuses the root, a mapping itself, and anything in
+a mapping that is not writable."
   (require-argument argument)
-  (let ((components (session-path session argument)))
-    (multiple-value-bind (kind mapping host-path)
-        (resolve (session-vfs session) components :intent :leaf)
-      (unless (eq kind :inside)
-        (error 'vfs-denied))
-      (unless (mapping-writable mapping)
-        (error 'vfs-denied :message "This folder is read-only."))
-      (values mapping host-path components))))
+  (multiple-value-bind (mapping rest components) (locate session argument)
+    (unless (and mapping rest)
+      (error 'vfs-denied))
+    (unless (mapping-writable mapping)
+      (error 'vfs-denied :message "This folder is read-only."))
+    (values mapping rest components)))
 
 (defun entry-for (session argument)
   "The entry ARGUMENT names, with its components, or signal VFS-NOT-FOUND."
-  (multiple-value-bind (kind mapping host-path components)
-      (resolve-existing session argument)
-    (values
-     (ecase kind
-       (:root (root-entry))
-       (:mapping-root (mapping-entry mapping))
-       (:inside (or (host-entry (first (last components)) host-path
-                                :writable (mapping-writable mapping))
-                    (error 'vfs-not-found))))
-     components)))
+  (multiple-value-bind (mapping rest components) (locate session argument)
+    (values (if mapping
+                (backend-entry (backend-of mapping) mapping rest)
+                (root-entry))
+            components)))
 
 (defun quote-path (string)
   "STRING in double quotes, with any it contains doubled, as 257 wants."
@@ -359,19 +357,13 @@ and anything in a mapping that is not writable."
 ;;; Changing things ------------------------------------------------------------------
 
 (define-command "DELE" (session argument)
-  (multiple-value-bind (mapping host-path) (resolve-for-change session argument)
-    (declare (ignore mapping))
-    (case (host-file-type host-path)
-      ((nil) (error 'vfs-not-found))
-      (:directory (error 'vfs-error :message "That is a directory; use RMD.")))
-    (sb-posix:unlink host-path)
+  (multiple-value-bind (mapping rest) (locate-for-change session argument)
+    (backend-delete (backend-of mapping) mapping rest)
     (values 250 "Deleted.")))
 
 (define-command "MKD" (session argument)
-  (multiple-value-bind (mapping host-path components)
-      (resolve-for-change session argument)
-    (declare (ignore mapping))
-    (sb-posix:mkdir host-path #o755)
+  (multiple-value-bind (mapping rest components) (locate-for-change session argument)
+    (backend-make-directory (backend-of mapping) mapping rest)
     (values 257 (format nil "~a created."
                         (quote-path (virtual-path-string components))))))
 
@@ -379,35 +371,31 @@ and anything in a mapping that is not writable."
   (command-mkd session argument))
 
 (define-command "RMD" (session argument)
-  (multiple-value-bind (mapping host-path) (resolve-for-change session argument)
-    (declare (ignore mapping))
-    (unless (eq :directory (host-file-type host-path))
-      (error 'vfs-error :message "Not a directory."))
-    (sb-posix:rmdir host-path)
+  (multiple-value-bind (mapping rest) (locate-for-change session argument)
+    (backend-remove-directory (backend-of mapping) mapping rest)
     (values 250 "Removed.")))
 
 (define-command "XRMD" (session argument)
   (command-rmd session argument))
 
 (define-command "RNFR" (session argument)
-  (multiple-value-bind (mapping host-path components)
-      (resolve-for-change session argument)
-    (unless (host-file-type host-path)
+  (multiple-value-bind (mapping rest components) (locate-for-change session argument)
+    (unless (backend-exists-p (backend-of mapping) mapping rest)
       (error 'vfs-not-found))
     (setf (session-rename-from session)
-          (list mapping host-path (virtual-path-string components)))
+          (list mapping rest (virtual-path-string components)))
     (values 350 "Ready for RNTO.")))
 
 (define-command "RNTO" (session argument)
   (let ((from (session-rename-from session)))
     (if (null from)
         (values 503 "Send RNFR first.")
-        (multiple-value-bind (mapping host-path) (resolve-for-change session argument)
+        (multiple-value-bind (mapping rest) (locate-for-change session argument)
           ;; A rename is one directory entry moving, and the host cannot move
           ;; one between two mapped directories that may be on two volumes.
           (unless (eq mapping (first from))
             (error 'vfs-error :message "Cannot rename from one mapped folder to another."))
-          (sb-posix:rename (second from) host-path)
+          (backend-rename (backend-of mapping) mapping (second from) rest)
           (values 250 "Renamed.")))))
 
 ;;; What a client did, in words -----------------------------------------------------

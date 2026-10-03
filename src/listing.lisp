@@ -87,10 +87,6 @@ directory behind it can be reached just now."
                     :mode #o555 :links 2 :mtime (get-universal-time)
                     :writable (mapping-writable mapping)))))
 
-(defun root-entries (vfs)
-  "The root's entries: one directory for each mapping."
-  (mapcar #'mapping-entry (vfs-mappings vfs)))
-
 (defun root-entry ()
   "The root itself."
   (make-entry :name "/" :type :directory :mode #o555 :links 2

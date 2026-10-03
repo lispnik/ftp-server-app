@@ -12,6 +12,10 @@
    #:valid-mapping-name-p #:mapping-error
    #:vfs-error #:vfs-not-found #:vfs-denied
    #:parse-virtual-path #:virtual-path-string #:resolve #:real-path
+   #:host-mapping-p #:mapping-backend #:vfs-add-backend
+   ;; Files and directories made by Lisp, for init.lisp.
+   #:lisp-file #:lisp-directory #:vfs-add-lisp #:define-lisp-mapping
+   #:init-file #:load-init-file
    ;; The server.
    #:server #:make-server #:start-server #:stop-server
    #:server-port #:server-running-p #:server-session-count

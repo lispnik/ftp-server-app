@@ -109,6 +109,16 @@ without unwinding anything, so this is the only chance."
                  (objc:objc-object-pointer delegate))
     controller))
 
+(defun load-init-mappings (controller)
+  "Load init.lisp and add what it maps, saying in the activity pane what came
+of it."
+  (multiple-value-bind (mappings problem) (load-init-file)
+    (dolist (sentence (model-add-lisp-mappings (controller-model controller) mappings))
+      (controller-add-activity controller nil nil sentence))
+    (when problem
+      (controller-add-activity controller nil nil problem))
+    (objc:invoke (controller-table controller) "reloadData")))
+
 (defun self-test-seconds ()
   "How long FTP_SERVER_SELFTEST says to run for, or NIL.
 
@@ -133,6 +143,7 @@ it while it lasts."
         (let ((controller (build-application (model-load)))
               (seconds (self-test-seconds)))
           (show-window controller)
+          (load-init-mappings controller)
           (note "ready")
           (when (and (model-start-at-launch (controller-model controller))
                      (not seconds))

@@ -446,7 +446,10 @@ controller is the data source of both."
           ((string= key "writable")
            (objc:invoke "NSNumber" "numberWithBool:" (mapping-writable mapping)))
           ((string= key "path")
-           (objc:string-to-ns-string (mapping-host-path mapping) t))
+           (objc:string-to-ns-string (if (host-mapping-p mapping)
+                                         (mapping-host-path mapping)
+                                         (backend-description (mapping-backend mapping)))
+                                     t))
           (t
            (objc:string-to-ns-string (mapping-name mapping) t)))))
 

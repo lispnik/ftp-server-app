@@ -503,3 +503,14 @@ each a list of the time, the user, the address and the message."
     (let ((shown (certificate-shown controller)))
       (objc:invoke (target controller) "newCertificate:" (cffi:null-pointer))
       (is (string= shown (certificate-shown controller))))))
+
+(test a-lisp-mapping-shows-in-the-table-as-what-made-it
+  (with-controller (controller)
+    (fs::controller-add-directory controller "/tmp")
+    (fs:vfs-add-lisp (fs:model-vfs (fs::controller-model controller)) "gen"
+                     (fs:lisp-directory "gen" '()) :description "(made by init.lisp)")
+    (objc:invoke (table controller) "reloadData")
+    (is (= 2 (objc:invoke (table controller) "numberOfRows")))
+    (is (string= "gen" (cell-string controller "name" 1)))
+    (is (string= "(made by init.lisp)" (cell-string controller "path" 1)))
+    (is (string= "/tmp" (cell-string controller "path" 0)))))
