@@ -43,7 +43,10 @@ certificate. Put that in `local.mk`, which is not committed.
 - **Port.** 2121 by default. Ports below 1024 need root.
 - **Allow connections from other computers.** Off, the server listens on
   127.0.0.1 only. On, it listens on every interface and is announced with
-  Bonjour.
+  Bonjour as `_ftp._tcp`, for FTP clients that browse for one. Finder does
+  not: its Network list shows file servers and screens to share, not FTP
+  servers. In Finder, use Go → Connect to Server with `ftp://` and the
+  address; Finder's FTP is read-only and cannot use TLS.
 - **Bonjour name.** The name the server is announced under; empty means this
   computer's name.
 - **Require TLS.** Refuses any client that does not encrypt, before it has

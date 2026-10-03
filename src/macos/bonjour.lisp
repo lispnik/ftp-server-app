@@ -2,8 +2,10 @@
 ;;;;
 ;;;; NSNetService hands the announcement to the system's own mDNS responder,
 ;;;; which is already running and already answers for this computer's name.
-;;;; The service is _ftp._tcp, which is what Finder's Connect to Server and
-;;;; other FTP clients browse for.
+;;;; The service is _ftp._tcp, the type registered for FTP, which is what an
+;;;; FTP client with a Bonjour browser looks for.  Finder is not one: it lists
+;;;; file servers (SMB, AFP) and screens to share, and macOS 26's libraries
+;;;; and Finder itself do not so much as name _ftp._tcp.
 ;;;;
 ;;;; Main thread only: the service reports back through the run loop it was
 ;;;; made on.
