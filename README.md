@@ -11,6 +11,21 @@ Built with SBCL, [objc](https://github.com/lispnik/objc) for AppKit,
 [asdf-macos-app](https://github.com/lispnik/asdf-macos-app) for the bundle,
 FiveAM for the tests and ocicl for the dependencies.
 
+![The FTP Server window, running, with the activity of three clients](doc/screenshots/02-main-running-with-activity.png)
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Stopped](doc/screenshots/01-main-stopped.png) | ![The activity table sorted by user](doc/screenshots/03-activity-sorted-by-user.png) |
+| The window, stopped: four shared folders, one made by `init.lisp`. | The activity table sorted by user, by a click on its header. |
+| ![The Users window with ann selected](doc/screenshots/04-users-ann.png) | ![The Users window with bob selected](doc/screenshots/05-users-bob.png) |
+| ann may read and write two folders and read two more. | bob may read two; the other two are hidden from him. |
+
+The activity above is real: `curl` sessions against the running server,
+including an upload bob was refused, a folder he was told is not there, and
+a login with the wrong password.
+
 ## Building
 
 ```sh
