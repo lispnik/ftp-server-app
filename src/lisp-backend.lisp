@@ -129,7 +129,7 @@ the same name, the first of them winning."
 (defun node-entry (node name mapping)
   "The entry a client sees for NODE, called NAME."
   (if (lisp-directory-p node)
-      (let ((writable (and (mapping-writable mapping) (lisp-directory-on-upload node) t)))
+      (let ((writable (and (may-write-p mapping) (lisp-directory-on-upload node) t)))
         (make-entry :name name :type :directory :size 0 :links 2
                     :mode (if writable #o755 #o555)
                     :mtime (node-mtime node) :writable writable))

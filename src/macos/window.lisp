@@ -10,8 +10,6 @@
   ((model :initarg :model :accessor controller-model)
    (window :initform nil :accessor controller-window)
    (table :initform nil :accessor controller-table)
-   (username-field :initform nil :accessor controller-username-field)
-   (password-field :initform nil :accessor controller-password-field)
    (port-field :initform nil :accessor controller-port-field)
    (bonjour-field :initform nil :accessor controller-bonjour-field)
    (remote-checkbox :initform nil :accessor controller-remote-checkbox)
@@ -71,9 +69,7 @@ may log in are fixed while it runs; the folders are not."
                  (controller-status-text controller))
     (objc:invoke (controller-start-button controller) "setTitle:"
                  (if running "Stop" "Start"))
-    (dolist (control (list (controller-username-field controller)
-                           (controller-password-field controller)
-                           (controller-port-field controller)
+    (dolist (control (list (controller-port-field controller)
                            (controller-bonjour-field controller)
                            (controller-remote-checkbox controller)
                            (controller-tls-checkbox controller)))
@@ -141,10 +137,6 @@ client shows when it asks whether to trust the server."
 (defun show-model (controller)
   "Put the model's settings into the fields."
   (let ((model (controller-model controller)))
-    (objc:invoke (controller-username-field controller) "setStringValue:"
-                 (model-username model))
-    (objc:invoke (controller-password-field controller) "setStringValue:"
-                 (model-password model))
     (objc:invoke (controller-port-field controller) "setStringValue:"
                  (format nil "~d" (model-port model)))
     (objc:invoke (controller-bonjour-field controller) "setStringValue:"
@@ -163,9 +155,7 @@ client shows when it asks whether to trust the server."
 not one; the other fields are taken as they are."
   (let ((model (controller-model controller))
         (port (parse-port (field-string (controller-port-field controller)))))
-    (setf (model-username model) (field-string (controller-username-field controller))
-          (model-password model) (field-string (controller-password-field controller))
-          (model-bonjour-name model)
+    (setf (model-bonjour-name model)
           (string-trim " " (field-string (controller-bonjour-field controller)))
           (model-allow-remote model)
           (= 1 (objc:invoke (controller-remote-checkbox controller) "state"))
@@ -195,7 +185,9 @@ not one; the other fields are taken as they are."
   (let ((trouble (save-model controller)))
     (setf (controller-message controller) (or message trouble)))
   (objc:invoke (controller-table controller) "reloadData")
-  (refresh-controls controller))
+  (refresh-controls controller)
+  ;; Its table of access is a table of these mappings.
+  (refresh-users-window))
 
 ;;; Starting and stopping -------------------------------------------------------------
 
@@ -443,8 +435,6 @@ controller is the data source of both."
                  (objc:string-to-ns-string (activity-cell (aref rows row) key) t)
                  (cffi:null-pointer))))
           ((null mapping) (cffi:null-pointer))
-          ((string= key "writable")
-           (objc:invoke "NSNumber" "numberWithBool:" (mapping-writable mapping)))
           ((string= key "path")
            (objc:string-to-ns-string (if (host-mapping-p mapping)
                                          (mapping-host-path mapping)
@@ -463,9 +453,6 @@ controller is the data source of both."
     (cond ((null-object-p value))
           ;; Nothing in the activity pane is to be changed.
           ((activity-table-p self table))
-          ((string= key "writable")
-           (model-set-writable model row (objc:invoke-bool value "boolValue"))
-           (controller-changed self))
           ((string= key "name")
            ;; A refused name leaves the mapping as it was; the table redraws
            ;; the old one and the status line says why.
@@ -555,9 +542,9 @@ controller is the data source of both."
     ;; Edge to edge, so that the three widths below are the whole of it.
     (objc:invoke table "setStyle:" +ns-table-view-style-full-width+)
     (add-column table "name" "Name" 130d0 :editable t)
-    ;; The host directory takes whatever width is going; the others keep theirs.
-    (add-column table "path" "Folder on This Mac" 280d0 :resizing 3)
-    (add-column table "writable" "Writable" 70d0 :editable t :checkbox t)
+    ;; The host directory takes whatever width is going; the name keeps its own.
+    ;; Who may read or write each one is the Users window's business.
+    (add-column table "path" "Folder on This Mac" 350d0 :resizing 3)
     (objc:invoke table "setUsesAlternatingRowBackgroundColors:" t)
     ;; Several rows at once, for Copy.
     (objc:invoke table "setAllowsMultipleSelection:" t)
@@ -585,7 +572,7 @@ controller is the data source of both."
     button))
 
 (defparameter +window-width+ 680d0)
-(defparameter +window-height+ 782d0)
+(defparameter +window-height+ 722d0)
 (defparameter +activity-height+ 156d0)
 
 (defun add-checkbox (content title frame mask target)
@@ -665,11 +652,7 @@ is what grows when the window does."
              (prog1 (add-checkbox content title (vector 126d0 (+ y 4d0) 400d0 18d0)
                                   top target)
                (decf y 24d0))))
-      (setf (controller-username-field controller)
-            (labelled-field "User name:" "NSTextField" 200d0)
-            (controller-password-field controller)
-            (labelled-field "Password:" "NSSecureTextField" 200d0)
-            (controller-port-field controller)
+      (setf (controller-port-field controller)
             (labelled-field "Port:" "NSTextField" 70d0)
             (controller-bonjour-field controller)
             (labelled-field "Bonjour name:" "NSTextField" 200d0))
@@ -726,6 +709,9 @@ is what grows when the window does."
       (setf (controller-remove-button controller)
             (add-button content "Remove" "removeMapping:"
                         (vector 106d0 (+ above-activity 28d0) 90d0 32d0) bottom target))
+      (add-button content "Users…" "showUsers:"
+                  (vector (- +window-width+ 124d0) (+ above-activity 28d0) 110d0 32d0)
+                  (logior +flexible-left+ bottom) target)
       ;; And the table between the two.
       (let ((table-bottom (+ above-activity 68d0)))
         (add-label content "Shared folders:" (vector 20d0 (- y 2d0) 300d0 17d0) top)

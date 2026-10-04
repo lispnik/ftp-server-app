@@ -25,7 +25,11 @@ its reply.")
    (peer :initarg :peer :initform nil :reader session-peer)
    (state :initform :new :accessor session-state
           :documentation ":NEW, :NEED-PASSWORD or :LOGGED-IN.")
-   (user :initform nil :accessor session-user)
+   (user :initform nil :accessor session-user
+         :documentation "The name the client gave with USER.")
+   (account :initform nil :accessor session-account
+            :documentation "Once logged in: what the authenticator answered,
+which is what the server's ACCESS function is asked about.")
    (cwd :initform '() :accessor session-cwd)
    (rename-from :initform nil :accessor session-rename-from
                 :documentation "After RNFR: a list of the mapping, the host
@@ -69,6 +73,14 @@ of the line after one space, or NIL if there is none."
                  (< (1+ space) (length line))
                  (subseq line (1+ space))))))
 
+(defun session-access-function (session)
+  "What *ACCESS* is while SESSION runs a command: its own user's access."
+  (let ((access (server-access (session-server session)))
+        (account (session-account session)))
+    (if access
+        (lambda (mapping) (funcall access account mapping))
+        'default-access)))
+
 (defun dispatch (session verb argument)
   "Run the command VERB and answer its reply.
 
@@ -77,7 +89,8 @@ that: the reply does not distinguish a file that is missing from one that a
 link put out of reach."
   (let ((command (gethash verb *commands*)))
     (multiple-value-prog1
-        (cond ((null command)
+        (let ((*access* (session-access-function session)))
+         (cond ((null command)
                (values 502 "Command not implemented."))
               ((and (cdr command) (not (eq :logged-in (session-state session))))
                (values 530 "Please log in with USER and PASS."))
@@ -88,7 +101,7 @@ link put out of reach."
                  (sb-posix:syscall-error (condition)
                    (values 550 (sb-int:strerror (sb-posix:syscall-errno condition))))
                  (file-error ()
-                   (values 550 "The file could not be opened.")))))
+                   (values 550 "The file could not be opened."))))))
       ;; RNFR is good for the next command only.
       (unless (string= verb "RNFR")
         (setf (session-rename-from session) nil))
@@ -114,10 +127,11 @@ for a mapping there is none of."
   (let ((components (session-path session argument)))
     (if (null components)
         (values nil '() components)
-        (values (or (vfs-find (session-vfs session) (first components))
-                    (error 'vfs-not-found))
-                (rest components)
-                components))))
+        (let ((mapping (vfs-find (session-vfs session) (first components))))
+          ;; One this user may not see is not there, as far as they can tell.
+          (unless (and mapping (may-read-p mapping))
+            (error 'vfs-not-found))
+          (values mapping (rest components) components)))))
 
 (defun locate-for-change (session argument)
   "Where ARGUMENT is, as something to create, remove or rename: (values
@@ -127,7 +141,7 @@ a mapping that is not writable."
   (multiple-value-bind (mapping rest components) (locate session argument)
     (unless (and mapping rest)
       (error 'vfs-denied))
-    (unless (mapping-writable mapping)
+    (unless (may-write-p mapping)
       (error 'vfs-denied :message "This folder is read-only."))
     (values mapping rest components)))
 
@@ -211,8 +225,11 @@ a mapping that is not writable."
 (define-command "PASS" (session argument :login nil)
   (cond ((not (eq :need-password (session-state session)))
          (values 503 "Send USER first."))
-        ((funcall (server-authenticator (session-server session))
-                  (session-user session) (or argument ""))
+        ((let ((account (funcall (server-authenticator (session-server session))
+                                 (session-user session) (or argument ""))))
+           (when account
+             (setf (session-account session) account)
+             t))
          (setf (session-state session) :logged-in
                (session-cwd session) '())
          (values 230 "Logged in."))

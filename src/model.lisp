@@ -7,8 +7,7 @@
 
 (defclass model ()
   ((vfs :initform (make-vfs) :reader model-vfs)
-   (username :initform "" :accessor model-username)
-   (password :initform "" :accessor model-password)
+   (accounts :initform (make-accounts) :reader model-accounts)
    (port :initform *default-port* :accessor model-port)
    (allow-remote :initform nil :accessor model-allow-remote
                  :documentation "Listen on every interface rather than loopback.")
@@ -26,27 +25,30 @@ the certificate in use.")
 ;;; Settings ---------------------------------------------------------------------
 
 (defun apply-settings (model settings)
-  (setf (model-username model) (getf settings :username)
-        (model-password model) (getf settings :password)
-        (model-port model) (getf settings :port)
+  (setf (model-port model) (getf settings :port)
         (model-allow-remote model) (getf settings :allow-remote)
         (model-bonjour-name model) (getf settings :bonjour-name)
         (model-start-at-launch model) (getf settings :start-at-launch)
         (model-require-tls model) (getf settings :require-tls))
   (dolist (item (getf settings :mappings))
     ;; A mapping the file should not have had is dropped, not fatal.
-    (handler-case (vfs-add (model-vfs model) (getf item :name) (getf item :path)
-                           :writable (getf item :writable))
+    (handler-case (vfs-add (model-vfs model) (getf item :name) (getf item :path))
       (mapping-error () nil)))
+  (dolist (item (getf settings :users))
+    (handler-case (accounts-add (model-accounts model) (getf item :name)
+                                :password (getf item :password)
+                                :access (getf item :access))
+      (account-error () nil)))
   model)
 
 (defun make-model (&optional (settings (default-settings)))
   (apply-settings (make-instance 'model) settings))
 
+(defun model-users (model)
+  (accounts-users (model-accounts model)))
+
 (defun model-settings (model)
-  (list :version 1
-        :username (model-username model)
-        :password (model-password model)
+  (list :version 2
         :port (model-port model)
         :allow-remote (model-allow-remote model)
         :bonjour-name (model-bonjour-name model)
@@ -57,51 +59,120 @@ the certificate in use.")
         :mappings (loop for mapping in (vfs-mappings (model-vfs model))
                         when (host-mapping-p mapping)
                           collect (list :name (mapping-name mapping)
-                                        :path (mapping-host-path mapping)
-                                        :writable (mapping-writable mapping)))))
+                                        :path (mapping-host-path mapping)))
+        ;; Grants on a Lisp mapping are kept, by its name, for when init.lisp
+        ;; makes it again.
+        :users (loop for user in (model-users model)
+                     collect (list :name (user-name user)
+                                   :password (user-password user)
+                                   :access (copy-alist (user-grants user))))))
 
-;;; Where the password is kept --------------------------------------------------------
+;;; Where passwords are kept -----------------------------------------------------------
 
 (defstruct password-store
-  "Somewhere other than the settings file to keep the password.  FETCH is a
-function of no arguments answering it, or the empty string; STORE is a function
-of the password.  Either may signal an error."
-  fetch store)
+  "Somewhere other than the settings file to keep passwords, one for each
+user.  FETCH is a function of a user name answering their password, or the
+empty string; STORE is a function of a user name and a password; FORGET of a
+user name.  Any of them may signal an error."
+  fetch store forget)
 
 (defvar *password-store* nil
-  "NIL to keep the password in the settings file, which is what the tests and
-anything without a keychain do, or a PASSWORD-STORE to keep it there instead.")
+  "NIL to keep passwords in the settings file, which is what the tests and
+anything without a keychain do, or a PASSWORD-STORE to keep them there instead.")
 
 (defun model-save (model &optional (path (settings-file)))
-  "Save the model's settings.  With a password store the password goes there
-and the file is written without one, whether or not the store took it: a
+  "Save the model's settings.  With a password store the passwords go there
+and the file is written without them, whether or not the store took them: a
 password the keychain refused is not then left in a file instead.  Answers
-whether the password was saved."
+whether every password was saved."
   (let ((settings (model-settings model))
         (saved t))
     (when *password-store*
-      (setf (getf settings :password) ""
-            saved (handler-case
-                      (progn (funcall (password-store-store *password-store*)
-                                      (model-password model))
-                             t)
-                    (error () nil))))
+      (dolist (user (getf settings :users))
+        (unless (handler-case
+                    (progn (funcall (password-store-store *password-store*)
+                                    (getf user :name) (getf user :password))
+                           t)
+                  (error () nil))
+          (setf saved nil))
+        (setf (getf user :password) "")))
     (save-settings settings path)
     saved))
 
 (defun model-load (&optional (path (settings-file)))
-  "A model from the settings in PATH.  With a password store the password comes
-from there -- unless the file has one, left by a version that kept it in the
-file, which is then moved to the store and taken out of the file."
+  "A model from the settings in PATH.  With a password store the passwords
+come from there -- unless the file has them, left by a version that kept them
+in the file, when they are moved to the store and taken out of the file."
   (let* ((settings (load-settings path))
          (model (make-model settings)))
     (when *password-store*
-      (if (string/= "" (getf settings :password))
+      (if (some (lambda (user) (string/= "" (getf user :password)))
+                (getf settings :users))
           (model-save model path)
-          (setf (model-password model)
-                (handler-case (funcall (password-store-fetch *password-store*))
-                  (error () "")))))
+          (dolist (user (model-users model))
+            (accounts-set-password (model-accounts model) user
+                                   (handler-case
+                                       (funcall (password-store-fetch *password-store*)
+                                                (user-name user))
+                                     (error () ""))))))
     model))
+
+(defun forget-password (name)
+  "Take NAME's password out of the password store, if there is one."
+  (when *password-store*
+    (ignore-errors (funcall (password-store-forget *password-store*) name))))
+
+;;; Users ------------------------------------------------------------------------
+
+(defun model-user (model index)
+  "The user in row INDEX, or NIL."
+  (and (integerp index) (>= index 0)
+       (nth index (model-users model))))
+
+(defun model-add-user (model &optional (base "user"))
+  "Add a user with no password and no access, named BASE or BASE with a number
+after it.  Answers the user."
+  (let ((accounts (model-accounts model)))
+    (accounts-add accounts
+                  (if (accounts-find-equal accounts base)
+                      (loop for number from 2
+                            for candidate = (format nil "~a~d" base number)
+                            unless (accounts-find-equal accounts candidate)
+                              return candidate)
+                      base))))
+
+(defun accounts-find-equal (accounts name)
+  (find name (accounts-users accounts) :key #'user-name :test #'string-equal))
+
+(defun model-remove-user (model user)
+  "Remove USER, and their password from wherever it is kept."
+  (when (accounts-remove (model-accounts model) user)
+    (forget-password (user-name user))
+    t))
+
+(defun model-rename-user (model user name)
+  "Call USER NAME.  Answers (values T NIL), or (values NIL MESSAGE) and
+leaves them as they were."
+  (let ((old (user-name user))
+        (name (string-trim " " name)))
+    (handler-case
+        (progn (accounts-rename (model-accounts model) user name)
+               ;; The password is kept under the name, so it moves with it.
+               (unless (string= old name)
+                 (forget-password old))
+               (values t nil))
+      (account-error (condition)
+        (values nil (account-error-message condition))))))
+
+(defun model-set-password (model user password)
+  (accounts-set-password (model-accounts model) user password))
+
+(defun model-access (model user mapping)
+  "USER's level on MAPPING: NIL, :READ or :READ-WRITE."
+  (user-access (model-accounts model) user (mapping-name mapping)))
+
+(defun model-set-access (model user mapping level)
+  (setf (user-access (model-accounts model) user (mapping-name mapping)) level))
 
 ;;; Mappings ---------------------------------------------------------------------
 
@@ -142,9 +213,12 @@ Answers (values MAPPING NIL), or (values NIL MESSAGE)."
                   nil)))))
 
 (defun model-remove-mapping (model index)
-  "Remove the mapping in row INDEX.  True if there was one."
+  "Remove the mapping in row INDEX, and what every user had on it.  True if
+there was one."
   (let ((mapping (model-mapping model index)))
-    (and mapping (vfs-remove (model-vfs model) mapping))))
+    (when (and mapping (vfs-remove (model-vfs model) mapping))
+      (accounts-forget-mapping (model-accounts model) (mapping-name mapping))
+      t)))
 
 (defun model-rename-mapping (model index name)
   "Call the mapping in row INDEX NAME.  Answers (values T NIL), or
@@ -152,17 +226,15 @@ Answers (values MAPPING NIL), or (values NIL MESSAGE)."
   (let ((mapping (model-mapping model index)))
     (if (null mapping)
         (values nil "There is no such mapping.")
-        (handler-case (progn (vfs-rename (model-vfs model) mapping
-                                         (string-trim " " name))
-                             (values t nil))
-          (mapping-error (condition)
-            (values nil (mapping-error-message condition)))))))
-
-(defun model-set-writable (model index flag)
-  (let ((mapping (model-mapping model index)))
-    (when mapping
-      (setf (mapping-writable mapping) (and flag t))
-      t)))
+        (let ((old (mapping-name mapping)))
+          (handler-case (progn (vfs-rename (model-vfs model) mapping
+                                           (string-trim " " name))
+                               ;; What users had on it, they have still.
+                               (accounts-rename-mapping (model-accounts model)
+                                                        old (mapping-name mapping))
+                               (values t nil))
+            (mapping-error (condition)
+              (values nil (mapping-error-message condition))))))))
 
 ;;; The server -------------------------------------------------------------------
 
@@ -181,19 +253,6 @@ reached from another computer.  Announcing a loopback server would put a
 service in every browser on the network that none of them could open."
   (and (model-allow-remote model) t))
 
-(defun constant-time-string= (a b)
-  "Whether A and B are the same, taking as long to say no as to say yes."
-  (let ((a (line-to-octets a))
-        (b (line-to-octets b))
-        (difference 0))
-    (setf difference (logxor (length a) (length b)))
-    (dotimes (index (length a))
-      (setf difference
-            (logior difference
-                    (logxor (aref a index)
-                            (if (< index (length b)) (aref b index) 0)))))
-    (zerop difference)))
-
 (defvar *tls-maker* nil
   "NIL for a server with no TLS, or a function of no arguments that answers
 what MAKE-SERVER's :TLS wants and, as a second value, a sentence about the
@@ -206,15 +265,14 @@ Answers (values T NIL), or (values NIL MESSAGE)."
   (cond
     ((model-running-p model)
      (values nil "The server is already running."))
-    ((or (string= "" (model-username model)) (string= "" (model-password model)))
-     (values nil "Set a user name and a password first."))
+    ((notany (lambda (user) (string/= "" (user-password user))) (model-users model))
+     (values nil "Add a user with a password first, in Users…"))
     ((not (typep (model-port model) '(integer 1 65535)))
      (values nil "The port must be a number from 1 to 65535."))
     (t
-     ;; What a session checks against is what was set when the server started.
-     (let* ((username (model-username model))
-            (password (model-password model))
-            (tls-problem nil)
+     ;; Users, their passwords and what they may do are asked for at each
+     ;; login and each command, so changes apply to a running server.
+     (let* ((tls-problem nil)
             (tls-description nil)
             (tls (and *tls-maker*
                       (handler-case
@@ -228,10 +286,11 @@ Answers (values T NIL), or (values NIL MESSAGE)."
                      :tls tls
                      :require-tls (model-require-tls model)
                      :vfs (model-vfs model)
-                     :authenticator (lambda (user pass)
-                                      (let ((user-ok (constant-time-string= user username))
-                                            (pass-ok (constant-time-string= pass password)))
-                                        (and user-ok pass-ok)))
+                     :authenticator (lambda (name password)
+                                      (accounts-authenticate (model-accounts model)
+                                                             name password))
+                     :access (lambda (name mapping)
+                               (accounts-access (model-accounts model) name mapping))
                      :addresses (if (model-allow-remote model)
                                     *any-addresses*
                                     *loopback-addresses*)
@@ -367,41 +426,57 @@ between, which is what a spreadsheet wants."
   "What DEFINE-LISP-MAPPING has been told during this load of init.lisp,
 newest first.")
 
-(defun define-lisp-mapping (name root &key writable (description "(made by init.lisp)"))
+(defun define-lisp-mapping (name root &key (description "(made by init.lisp)"))
   "In init.lisp: map NAME to the tree whose root is the LISP-DIRECTORY ROOT.
-WRITABLE lets clients upload to the directories in it that take uploads."
+Who may see it, and upload to the directories in it that take uploads, is set
+for each user in the Users window, as for any mapping."
   (check-type root lisp-directory)
-  (push (list name root writable description) *init-mappings*)
+  (push (list name root description) *init-mappings*)
   name)
 
 (defun init-file ()
   "Where init.lisp is: beside the settings file."
   (merge-pathnames "init.lisp" (settings-directory)))
 
+(defun error-line (text)
+  "The line number SBCL's report of where a form went wrong gives, or NIL."
+  (let ((at (search "starting at line " text)))
+    (and at (parse-integer text :start (+ at (length "starting at line "))
+                                :junk-allowed t))))
+
 (defun load-init-file (&optional (path (init-file)))
   "Load init.lisp, if there is one.  Answers (values MAPPINGS PROBLEM):
-MAPPINGS each (NAME ROOT WRITABLE DESCRIPTION) in the order they were
-defined, and PROBLEM a sentence if loading it went wrong.  What was defined
-before an error is kept."
-  (let ((*init-mappings* '()))
+MAPPINGS each (NAME ROOT DESCRIPTION) in the order they were defined, and
+PROBLEM a sentence if loading it went wrong, saying on which line.  What was
+defined before an error is kept."
+  (let ((*init-mappings* '())
+        (said (make-string-output-stream)))
     (if (not (probe-file path))
         (values '() nil)
         (handler-case
             (let ((*package* (find-package '#:ftp-server))
-                  (*read-eval* t))
-              (load path :external-format :utf-8 :verbose nil :print nil)
+                  (*read-eval* t)
+                  ;; SBCL says where a form failed here; it goes in PROBLEM.
+                  (*error-output* said))
+              ;; A unit of its own, so that what the compiler has to say about
+              ;; it is said now and not when the program ends; and style
+              ;; warnings, which are about style, not said at all.
+              (with-compilation-unit (:override t)
+                (handler-bind ((style-warning #'muffle-warning))
+                  (load path :external-format :utf-8 :verbose nil :print nil)))
               (values (reverse *init-mappings*) nil))
           (error (condition)
-            (values (reverse *init-mappings*)
-                    (format nil "init.lisp: ~a" condition)))))))
+            (let ((line (error-line (get-output-stream-string said))))
+              (values (reverse *init-mappings*)
+                      (format nil "init.lisp~@[, line ~d~]: ~a" line condition))))))))
 
 (defun model-add-lisp-mappings (model mappings)
   "Add MAPPINGS, as LOAD-INIT-FILE answers them, to MODEL.  Answers a sentence
 for each one, saying what became of it."
-  (loop for (name root writable description) in mappings
+  (loop for (name root description) in mappings
         collect (handler-case
                     (progn (vfs-add-lisp (model-vfs model) name root
-                                         :writable writable :description description)
+                                         :description description)
                            (format nil "init.lisp mapped ~a" name))
                   (mapping-error (condition)
                     (format nil "init.lisp could not map ~a: ~a"

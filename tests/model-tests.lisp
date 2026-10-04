@@ -19,9 +19,7 @@
     (is (string= "tmp" (fs:mapping-name (fs:model-add-directory model "/tmp"))))
     (is (string= "tmp-2" (fs:mapping-name (fs:model-add-directory model "/tmp"))))
     (is (string= "tmp-3" (fs:mapping-name (fs:model-add-directory model "/tmp/"))))
-    (is (equal '("tmp" "tmp-2" "tmp-3") (mapping-names model)))
-    ;; Read-only until someone says otherwise.
-    (is (notany #'fs:mapping-writable (fs:vfs-mappings (fs:model-vfs model))))))
+    (is (equal '("tmp" "tmp-2" "tmp-3") (mapping-names model)))))
 
 (test only-a-directory-can-be-added
   (let ((model (fs:make-model)))
@@ -54,14 +52,10 @@
     (is-true (fs:model-rename-mapping model 0 "  temp  "))
     (is (equal '("temp" "var") (mapping-names model)))))
 
-(test rows-are-removed-and-made-writable-by-index
+(test rows-are-removed-by-index
   (let ((model (fs:make-model)))
     (fs:model-add-directory model "/tmp")
     (fs:model-add-directory model "/var")
-    (is-true (fs:model-set-writable model 1 t))
-    (is-false (fs:model-set-writable model 5 t))
-    (is (equal '(nil t) (mapcar #'fs:mapping-writable
-                                (fs:vfs-mappings (fs:model-vfs model)))))
     (is-true (fs:model-remove-mapping model 0))
     (is-false (fs:model-remove-mapping model 3))
     (is-false (fs:model-remove-mapping model -1))
@@ -76,26 +70,92 @@
   (is (null (fs:parse-port "")))
   (is (null (fs:parse-port "21.5"))))
 
-(test the-server-will-not-start-without-credentials
+;;; Users ------------------------------------------------------------------------
+
+(test new-users-get-names-of-their-own-and-nothing-else
   (let ((model (fs:make-model)))
-    (setf (fs:model-port model) 0)
+    (fs:model-add-directory model "/tmp")
+    (let ((first (fs:model-add-user model))
+          (second (fs:model-add-user model)))
+      (is (equal '("user" "user2") (user-names model)))
+      (is (string= "" (fs:user-password first)))
+      (is (null (fs:model-access model second (first (fs:vfs-mappings (fs:model-vfs model)))))
+          "no access until given some"))))
+
+(test a-user-can-be-renamed-but-not-onto-another
+  (let ((model (fs:make-model)))
+    (let ((ann (add-user model "ann" "a")))
+      (add-user model "bob" "b")
+      (is (equal '(t nil) (multiple-value-list (fs:model-rename-user model ann "  anne "))))
+      (is (equal '("anne" "bob") (user-names model)))
+      (multiple-value-bind (ok message) (fs:model-rename-user model ann "BOB")
+        (is (null ok))
+        (is (search "already" message)))
+      (is (null (fs:model-rename-user model ann "")))
+      (is (equal '("anne" "bob") (user-names model))))))
+
+(test removing-a-user-removes-them
+  (let ((model (fs:make-model)))
+    (let ((ann (add-user model "ann" "a")))
+      (add-user model "bob" "b")
+      (is-true (fs:model-remove-user model ann))
+      (is-false (fs:model-remove-user model ann))
+      (is (equal '("bob") (user-names model))))))
+
+(test access-is-kept-by-mapping-and-follows-it
+  (let ((model (fs:make-model)))
+    (fs:model-add-directory model "/tmp")
+    (fs:model-add-directory model "/var")
+    (let ((ann (add-user model "ann" "a" "tmp" :read-write "var" :read))
+          (tmp (fs:vfs-find (fs:model-vfs model) "tmp")))
+      (is (eq :read-write (fs:model-access model ann tmp)))
+      (fs:model-set-access model ann tmp :read)
+      (is (eq :read (fs:model-access model ann tmp)))
+      ;; Renamed, the mapping keeps who may use it.
+      (fs:model-rename-mapping model 0 "tempdir")
+      (is (eq :read (fs:model-access model ann tmp)))
+      (is (null (access-of model ann "tmp")))
+      ;; Removed, it leaves nothing behind: a new mapping with the old name
+      ;; is not opened to whoever had the old one.
+      (fs:model-remove-mapping model 1)
+      (is (null (access-of model ann "var")))
+      (fs:model-set-access model ann tmp nil)
+      (is (null (fs:model-access model ann tmp))))))
+
+(test a-bad-access-level-is-refused
+  (let* ((model (fs:make-model))
+         (ann (add-user model "ann" "a")))
+    (signals fs:account-error
+      (setf (fs:user-access (fs:model-accounts model) ann "tmp") :everything))))
+
+(test logging-in-wants-a-user-with-that-password
+  (let* ((model (fs:make-model))
+         (accounts (fs:model-accounts model)))
+    (add-user model "ann" "secret")
+    (add-user model "nopass" "")
+    (is (equal "ann" (fs:accounts-authenticate accounts "ann" "secret")))
+    (is (null (fs:accounts-authenticate accounts "ann" "wrong")))
+    (is (null (fs:accounts-authenticate accounts "ANN" "secret")) "names are exact")
+    (is (null (fs:accounts-authenticate accounts "nobody" "")))
+    (is (null (fs:accounts-authenticate accounts "nopass" "")) "no password, no login")))
+
+(test the-server-will-not-start-without-a-user-with-a-password
+  (let ((model (fs:make-model)))
+    (setf (fs:model-port model) (free-local-port))
     (multiple-value-bind (ok message) (fs:model-start model)
       (is (null ok))
-      (is (search "password" message)))
-    (setf (fs:model-username model) "ann")
+      (is (search "Users" message)))
+    (add-user model "ann" "")
     (is (null (fs:model-start model)))
     (is-false (fs:model-running-p model))
     (is (string= "Stopped." (fs:model-status-text model)))))
 
-(test the-model-starts-and-stops-a-server-that-knows-its-user
+(test the-model-starts-and-stops-a-server-that-knows-its-users
   (let ((model (fs:make-model))
         (delay fs::*login-failure-delay*))
-    (setf (fs:model-username model) "ann"
-          (fs:model-password model) "pw"
-          ;; Any free port; MODEL-START's own check wants 1 or more.
-          (fs:model-port model) (let ((probe (fs::listen-on #(127 0 0 1) 0)))
-                                  (prog1 (fs::socket-port probe)
-                                    (sb-bsd-sockets:socket-close probe)))
+    (add-user model "ann" "pw")
+    (add-user model "bob" "bw")
+    (setf (fs:model-port model) (free-local-port)
           fs::*login-failure-delay* 0)
     (unwind-protect
          (progn
@@ -108,14 +168,17 @@
              (is (search "already" message)))
            (with-client (client (fs:model-port model))
              (is (= 530 (login client "ann" "wrong")))
-             (is (= 530 (login client "bob" "pw")))
-             (is (= 230 (login client "ann" "pw")))
+             (is (= 530 (login client "ann" "bw")) "someone else's password")
+             (is (= 230 (login client "bob" "bw")))
              (is (search "1 client " (fs:model-status-text model))))
+           ;; A user added while it runs can log in at once.
+           (add-user model "cat" "cw")
+           (with-client (client (fs:model-port model))
+             (is (= 230 (login client "cat" "cw"))))
            ;; A second server on the same port is refused in words.
            (let ((other (fs:make-model)))
-             (setf (fs:model-username other) "a"
-                   (fs:model-password other) "b"
-                   (fs:model-port other) (fs:model-port model))
+             (add-user other "a" "b")
+             (setf (fs:model-port other) (fs:model-port model))
              (multiple-value-bind (ok message) (fs:model-start other)
                (is (null ok))
                (is (search "in use" message)))))
@@ -130,107 +193,134 @@
     (setf (fs:model-allow-remote model) t)
     (is-true (fs:model-advertise-p model))))
 
+(defun settings-in (directory)
+  (sb-ext:parse-native-namestring (path directory "settings.lisp")))
+
 (test the-model-goes-to-settings-and-back
   (with-temporary-directory (directory)
-    (let ((file (sb-ext:parse-native-namestring (path directory "settings.lisp")))
+    (let ((file (settings-in directory))
           (model (fs:make-model)))
-      (setf (fs:model-username model) "ann"
-            (fs:model-password model) "pw"
-            (fs:model-port model) 2200
+      (setf (fs:model-port model) 2200
             (fs:model-allow-remote model) t
             (fs:model-bonjour-name model) "Files")
       (fs:model-add-directory model "/tmp")
       (fs:model-rename-mapping model 0 "tempdir")
-      (fs:model-set-writable model 0 t)
+      (add-user model "ann" "pw" "tempdir" :read-write)
+      (add-user model "bob" "bw" "tempdir" :read "gen" :read)
       (fs:model-save model file)
       (let ((loaded (fs:make-model (fs:load-settings file))))
-        (is (string= "ann" (fs:model-username loaded)))
-        (is (string= "pw" (fs:model-password loaded)))
         (is (= 2200 (fs:model-port loaded)))
         (is-true (fs:model-allow-remote loaded))
         (is (string= "Files" (fs:model-bonjour-name loaded)))
         (is (equal '("tempdir") (mapping-names loaded)))
-        (let ((mapping (first (fs:vfs-mappings (fs:model-vfs loaded)))))
-          (is (string= "/tmp" (fs:mapping-host-path mapping)))
-          (is-true (fs:mapping-writable mapping)))))))
+        (is (equal '("ann" "bob") (user-names loaded)))
+        (destructuring-bind (ann bob) (fs:model-users loaded)
+          (is (string= "pw" (fs:user-password ann)))
+          (is (eq :read-write (access-of loaded ann "tempdir")))
+          (is (eq :read (access-of loaded bob "tempdir")))
+          ;; Kept for a Lisp mapping init.lisp will make again.
+          (is (eq :read (access-of loaded bob "gen"))))))))
 
 (test settings-with-a-clashing-mapping-keep-the-first
-  (let ((model (fs:make-model (list :version 1 :username "" :password "" :port 2121
+  (let ((model (fs:make-model (list :version 2 :port 2121
                                     :allow-remote nil :bonjour-name ""
-                                    :mappings '((:name "a" :path "/tmp" :writable nil)
-                                                (:name "A" :path "/var" :writable nil)
-                                                (:name "b/c" :path "/var" :writable nil))))))
-    (is (equal '("a") (mapping-names model)))))
+                                    :mappings '((:name "a" :path "/tmp")
+                                                (:name "A" :path "/var")
+                                                (:name "b/c" :path "/var"))
+                                    :users '((:name "ann" :password "" :access ())
+                                             (:name "ANN" :password "" :access ()))))))
+    (is (equal '("a") (mapping-names model)))
+    (is (equal '("ann") (user-names model)))))
 
-;;; A password kept somewhere else ----------------------------------------------------
+;;; Passwords kept somewhere else ------------------------------------------------------
 
-(defun memory-store (&key (password "") fail)
-  "A password store that keeps its password in a variable: (values STORE GET),
-GET a function answering what it now holds.  With FAIL it refuses to store."
-  (let ((kept password))
+(defun memory-store (&key fail)
+  "A password store that keeps passwords in a table: (values STORE TABLE).
+With FAIL it refuses to store."
+  (let ((kept (make-hash-table :test 'equal)))
     (values (fs:make-password-store
-             :fetch (lambda () kept)
-             :store (lambda (password)
+             :fetch (lambda (name) (gethash name kept ""))
+             :store (lambda (name password)
                       (when fail (error "refused"))
-                      (setf kept password)))
-            (lambda () kept))))
+                      (setf (gethash name kept) password))
+             :forget (lambda (name) (remhash name kept)))
+            kept)))
 
 (defmacro with-password-store ((store) &body body)
   `(let ((fs:*password-store* ,store))
      ,@body))
 
-(defun settings-in (directory)
-  (sb-ext:parse-native-namestring (path directory "settings.lisp")))
-
-(test with-a-store-the-password-is-not-in-the-file
+(test with-a-store-passwords-are-not-in-the-file
   (with-temporary-directory (directory)
     (multiple-value-bind (store kept) (memory-store)
       (with-password-store (store)
         (let ((model (fs:make-model)))
-          (setf (fs:model-username model) "ann"
-                (fs:model-password model) "hunter2")
+          (add-user model "ann" "hunter2")
+          (add-user model "bob" "swordfish")
           (is-true (fs:model-save model (settings-in directory)))
-          (is (string= "hunter2" (funcall kept)))
-          (is (null (search "hunter2" (read-file (path directory "settings.lisp")))))
+          (is (string= "hunter2" (gethash "ann" kept)))
+          (is (string= "swordfish" (gethash "bob" kept)))
+          (let ((text (read-file (path directory "settings.lisp"))))
+            (is (null (search "hunter2" text)))
+            (is (null (search "swordfish" text))))
           (let ((loaded (fs:model-load (settings-in directory))))
-            (is (string= "ann" (fs:model-username loaded)))
-            (is (string= "hunter2" (fs:model-password loaded)))))))))
+            (is (equal '("hunter2" "swordfish")
+                       (mapcar #'fs:user-password (fs:model-users loaded))))))))))
 
-(test a-password-left-in-the-file-is-moved-to-the-store
+(test removing-or-renaming-a-user-moves-their-password
   (with-temporary-directory (directory)
-    ;; Written by a version with no store.
-    (let ((model (fs:make-model)))
-      (setf (fs:model-username model) "ann"
-            (fs:model-password model) "old-secret")
-      (fs:model-save model (settings-in directory)))
-    (is (search "old-secret" (read-file (path directory "settings.lisp"))))
     (multiple-value-bind (store kept) (memory-store)
       (with-password-store (store)
-        (let ((loaded (fs:model-load (settings-in directory))))
-          (is (string= "old-secret" (fs:model-password loaded)))
-          (is (string= "old-secret" (funcall kept)))
-          (is (null (search "old-secret" (read-file (path directory "settings.lisp"))))
-              "and it is gone from the file"))))))
+        (let* ((model (fs:make-model))
+               (ann (add-user model "ann" "a"))
+               (bob (add-user model "bob" "b")))
+          (fs:model-save model (settings-in directory))
+          (fs:model-rename-user model ann "anne")
+          (fs:model-save model (settings-in directory))
+          (is (null (nth-value 1 (gethash "ann" kept))) "the old name's is gone")
+          (is (string= "a" (gethash "anne" kept)))
+          (fs:model-remove-user model bob)
+          (is (null (nth-value 1 (gethash "bob" kept)))))))))
 
-(test a-store-that-refuses-does-not-put-the-password-in-the-file
+(test a-single-user-file-becomes-a-user-with-their-access
+  ;; What the version with one login wrote: a user name and password, and
+  ;; which mappings were writable.
+  (with-temporary-directory (directory)
+    (write-file (path directory "settings.lisp")
+                "(:version 1 :username \"ann\" :password \"old-secret\" :port 2121
+                  :mappings ((:name \"rw\" :path \"/tmp\" :writable t)
+                             (:name \"ro\" :path \"/var\" :writable nil)))")
+    (multiple-value-bind (store kept) (memory-store)
+      (with-password-store (store)
+        (let* ((loaded (fs:model-load (settings-in directory)))
+               (ann (first (fs:model-users loaded))))
+          (is (equal '("ann") (user-names loaded)))
+          (is (string= "old-secret" (fs:user-password ann)))
+          (is (eq :read-write (access-of loaded ann "rw")))
+          (is (eq :read (access-of loaded ann "ro")))
+          ;; And the password has gone from the file to the store.
+          (is (string= "old-secret" (gethash "ann" kept)))
+          (is (null (search "old-secret" (read-file (path directory "settings.lisp"))))))))))
+
+(test a-store-that-refuses-does-not-put-passwords-in-the-file
   (with-temporary-directory (directory)
     (with-password-store ((memory-store :fail t))
       (let ((model (fs:make-model)))
-        (setf (fs:model-username model) "ann"
-              (fs:model-password model) "hunter2")
+        (add-user model "ann" "hunter2")
         (is-false (fs:model-save model (settings-in directory)))
         (let ((text (read-file (path directory "settings.lisp"))))
           (is (null (search "hunter2" text)))
           (is (search "ann" text) "the rest is saved all the same"))))))
 
-(test without-a-store-the-file-has-the-password
+(test without-a-store-the-file-has-the-passwords
   (with-temporary-directory (directory)
     (with-password-store (nil)
       (let ((model (fs:make-model)))
-        (setf (fs:model-password model) "hunter2")
+        (add-user model "ann" "hunter2")
         (is-true (fs:model-save model (settings-in directory)))
         (is (string= "hunter2"
-                     (fs:model-password (fs:model-load (settings-in directory)))))))))
+                     (fs:user-password
+                      (first (fs:model-users (fs:model-load (settings-in directory)))))))))))
 
 ;;; The activity log -----------------------------------------------------------------
 

@@ -9,9 +9,9 @@
   "Above 1023, so that the server needs no privilege to listen on it.")
 
 (defun default-settings ()
-  (list :version 1 :username "" :password "" :port *default-port*
+  (list :version 2 :port *default-port*
         :allow-remote nil :bonjour-name "" :start-at-launch nil :require-tls nil
-        :mappings '()))
+        :mappings '() :users '()))
 
 (defun settings-directory ()
   "The directory the settings file is in, where the TLS certificate is kept
@@ -58,8 +58,44 @@ can do what, so only a plain T turns one on."
                     (stringp (getf item :name))
                     (stringp (getf item :path)))
             collect (list :name (getf item :name)
-                          :path (getf item :path)
-                          :writable (true-p (getf item :writable))))))
+                          :path (getf item :path)))))
+
+(defun checked-access (object)
+  "The grants in OBJECT that are well formed: (mapping-name . level), with
+level :READ or :READ-WRITE.  Anything else -- a misspelt level above all -- is
+no access, which is the safe way to be wrong."
+  (when (listp object)
+    (loop for pair in object
+          when (and (consp pair)
+                    (stringp (car pair))
+                    (member (cdr pair) '(:read :read-write)))
+            collect (cons (car pair) (cdr pair)))))
+
+(defun checked-users (object)
+  "The users in OBJECT that are well formed, each as a property list."
+  (when (listp object)
+    (loop for item in object
+          when (and (plist-p item) (stringp (getf item :name)))
+            collect (list :name (getf item :name)
+                          :password (let ((password (getf item :password)))
+                                      (if (stringp password) password ""))
+                          :access (checked-access (getf item :access))))))
+
+(defun migrate-single-user (form)
+  "The users a version 1 file means: its one user name and password, with
+read and write on the mappings it marked writable and read on the rest."
+  (let ((name (getf form :username))
+        (password (getf form :password)))
+    (when (and (stringp name) (string/= "" name))
+      (list (list :name name
+                  :password (if (stringp password) password "")
+                  :access (loop for item in (and (listp (getf form :mappings))
+                                                 (getf form :mappings))
+                                when (and (plist-p item) (stringp (getf item :name)))
+                                  collect (cons (getf item :name)
+                                                (if (true-p (getf item :writable))
+                                                    :read-write
+                                                    :read))))))))
 
 (defun load-settings (&optional (path (settings-file)))
   "The settings in PATH, with a default for whatever is missing or malformed.
@@ -71,14 +107,16 @@ A file that cannot be read at all gives the defaults."
                (let ((value (getf form key settings)))
                  (when (and (not (eq value settings)) (funcall predicate value))
                    (setf (getf settings key) value)))))
-        (take :username #'stringp)
-        (take :password #'stringp)
         (take :port (lambda (value) (typep value '(integer 1 65535))))
         (take :bonjour-name #'stringp)
         (setf (getf settings :allow-remote) (true-p (getf form :allow-remote))
               (getf settings :start-at-launch) (true-p (getf form :start-at-launch))
               (getf settings :require-tls) (true-p (getf form :require-tls))
-              (getf settings :mappings) (checked-mappings (getf form :mappings)))))
+              (getf settings :mappings) (checked-mappings (getf form :mappings))
+              (getf settings :users)
+              (if (getf form :users)
+                  (checked-users (getf form :users))
+                  (migrate-single-user form)))))
     settings))
 
 (defun save-settings (settings &optional (path (settings-file)))

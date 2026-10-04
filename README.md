@@ -38,8 +38,16 @@ certificate. Put that in `local.mk`, which is not committed.
 
 ## Using it
 
-- **User name and password.** One account; there is no anonymous login. The
-  server will not start without both.
+- **Users…** opens the Users window: the people who may log in, each with a
+  password and, for every shared folder, No Access, Read, or Read & Write.
+  A user sees only the folders they have some access to: to them the others
+  are not there, rather than forbidden. Read lets them list and download;
+  Read & Write adds uploading, deleting, renaming and making directories.
+  Changes apply to a running server, from each client's next command; a user
+  who is removed keeps their connection and loses everything they could see.
+  There is no anonymous login, and the server will not start until some user
+  has a password. Names are unique whatever their case, and are typed exactly
+  when logging in.
 - **Port.** 2121 by default. Ports below 1024 need root.
 - **Allow connections from other computers.** Off, the server listens on
   127.0.0.1 only. On, it listens on every interface and is announced with
@@ -54,10 +62,11 @@ certificate. Put that in `local.mk`, which is not committed.
   accepted.
 - **Start serving when FTP Server opens.** Starts the server as soon as the
   window is up.
-- **Shared folders.** Add… chooses folders; double-click a name to change it;
-  tick Writable to allow uploads, deletes, renames and new directories in that
-  folder. Folders can be added, removed and changed while the server runs, and
-  clients see the change on their next command.
+- **Shared folders.** Add… chooses folders; double-click a name to change it.
+  Who may use each one is set in the Users window. A folder that is renamed
+  keeps its users; one that is removed takes their access with it. Folders can
+  be added, removed and changed while the server runs, and clients see the
+  change on their next command.
 
 - **Activity.** A table of what each connected client is doing, with a row for
   each thing: the time, the user (`anon` until someone has logged in), the IP
@@ -82,7 +91,7 @@ which every current client does; `PASV` has no room for the address.
 ```sh
 curl --user name:password ftp://127.0.0.1:2121/
 curl --user name:password ftp://127.0.0.1:2121/tempdir/
-curl --user name:password -T file.txt ftp://127.0.0.1:2121/tempdir/   # needs Writable
+curl --user name:password -T file.txt ftp://127.0.0.1:2121/tempdir/   # needs Read & Write
 curl --ssl-reqd -k --user name:password ftp://127.0.0.1:2121/         # over TLS; -k trusts the certificate
 dns-sd -B _ftp._tcp                                                   # the Bonjour announcement
 ```
@@ -119,8 +128,7 @@ makes as they are asked for:
   ;; Uploads here are handed to the function, whole, once they have arrived.
   (lisp-directory "dropbox" '()
                   :on-upload (lambda (name octets)
-                               (format t "~a: ~d octets~%" name (length octets))))
-  :writable t)
+                               (format t "~a: ~d octets~%" name (length octets)))))
 ```
 
 - `(lisp-file name content &key mtime)` — `content` is a string, a vector of
@@ -130,10 +138,12 @@ makes as they are asked for:
 - `(lisp-directory name children &key mtime on-upload)` — `children` is a list
   of nodes, or a function returning one, called each time the directory is
   looked into. With `on-upload`, a function of the file's name and its octets,
-  the directory takes uploads when its mapping is writable. Uploads are whole:
+  the directory takes uploads from users with Read & Write on its mapping.
+  Uploads are whole:
   `APPE` and resuming are refused.
-- `(define-lisp-mapping name root &key writable description)` — `description`
-  is what the window shows in place of a folder.
+- `(define-lisp-mapping name root &key description)` — `description` is what
+  the window shows in place of a folder. Who may use the mapping is set in the
+  Users window, as for any other, and kept by its name between launches.
 
 Nothing in a Lisp mapping can be deleted, made or renamed. Downloads, `REST`,
 ASCII mode, TLS and the activity log work as they do for folders. What a
@@ -167,15 +177,18 @@ startup file does.
 - **TLS uses OpenSSL**, through cl+ssl. The build needs Homebrew's
   (`brew install openssl`); the bundle carries its own copy and uses that one,
   which asdf-macos-app arranges as it saves the image.
-- **The password is kept in your login keychain**, as the item
-  `org.lispnik.ftp-server`, and not in the settings file. A settings file from
-  before that, with a password in it, has it moved to the keychain the first
-  time it is read. A keychain item belongs to the application that made it, and
+- **Passwords are kept in your login keychain**, one item for each user, under
+  the service `org.lispnik.ftp-server` and the user's name, and not in the
+  settings file. A keychain item belongs to the application that made it, and
   an ad hoc signature is different on each build, so after rebuilding macOS
-  asks once whether the new build may read it; a Developer ID signature avoids
-  that. When `FTP_SERVER_SETTINGS` names another settings file the password
-  stays in that file instead, unless `FTP_SERVER_KEYCHAIN` names a keychain
-  service to use.
+  asks once for each user whether the new build may read it; a Developer ID
+  signature avoids that. When `FTP_SERVER_SETTINGS` names another settings file
+  the passwords stay in that file instead, unless `FTP_SERVER_KEYCHAIN` names a
+  keychain service to use.
+- **Settings from the version with one login are converted** the first time
+  they are read: that login becomes a user with Read & Write on the folders
+  that were Writable and Read on the rest, and its password moves to that
+  user's keychain item.
 - **Passive mode only** (`PASV` and `EPSV`); `PORT` is refused.
 - **Transfers are binary unless the client asks for ASCII.** After `TYPE A`,
   an upload's CR LF line endings are stored as LF and a download's LF goes out
@@ -202,10 +215,11 @@ src/                 the server; no Objective-C, depends only on SBCL's contribs
   server.lisp        the listener and its threads
   protocol.lisp      commands that move no data
   session.lisp       one client; PASV, listings and transfers
+  accounts.lisp      users, their passwords, and what each may do with each mapping
   settings.lisp      the settings file
   tls.lisp           the certificate and the handshake; the only file that knows OpenSSL
   model.lisp         what the window does, with no window in it
-src/macos/           the window, the Bonjour announcement, the application
+src/macos/           the windows, the keychain, the Bonjour announcement, the application
 tests/               FiveAM; ui-tests drive the real window without showing it
 ```
 

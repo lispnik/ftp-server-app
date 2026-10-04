@@ -24,7 +24,14 @@
 (defclass server ()
   ((vfs :initarg :vfs :reader server-vfs)
    (authenticator :initarg :authenticator :reader server-authenticator
-                  :documentation "A function of a user name and a password.")
+                  :documentation "A function of a user name and a password,
+answering NIL to refuse them or, to let them in, whatever ACCESS is to be told
+about who they are.")
+   (access :initarg :access :initform nil :reader server-access
+           :documentation "NIL, for DEFAULT-ACCESS for everyone, or a function
+of what the authenticator answered and a mapping, answering NIL, :READ or
+:READ-WRITE.  Asked at every command, so a change applies to clients already
+logged in, from their next command.")
    (addresses :initarg :addresses :reader server-addresses
               :documentation "What to listen on.  The first has to work; the
 rest are listened on if they can be.")
@@ -48,7 +55,7 @@ handshake over it, and answers the encrypted stream.  It is called with
    (lock :initform (sb-thread:make-mutex :name "ftp-server sessions")
          :reader server-lock)))
 
-(defun make-server (&key vfs authenticator (addresses *loopback-addresses*) (port 2121)
+(defun make-server (&key vfs authenticator access (addresses *loopback-addresses*) (port 2121)
                       on-event tls require-tls)
   "A server that is not yet listening.
 
@@ -59,7 +66,7 @@ arguments:
   :CLIENT-CONNECTED address     :CLIENT-DISCONNECTED address
   :ACTIVITY user address text   what a client did, in words
   :LOG string                   something that went wrong"
-  (make-instance 'server :vfs vfs :authenticator authenticator
+  (make-instance 'server :vfs vfs :authenticator authenticator :access access
                          :addresses addresses :port port :on-event on-event
                          :tls tls :require-tls require-tls))
 

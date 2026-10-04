@@ -91,7 +91,7 @@ links and staying inside it are HOST-PATH-IN's."))
       (mapping-entry mapping)
       (or (host-entry (leaf-name mapping components)
                       (host-path-in mapping components)
-                      :writable (mapping-writable mapping))
+                      :writable (may-write-p mapping))
           (error 'vfs-not-found))))
 
 (defmethod backend-list ((backend host-backend) mapping components)
@@ -100,7 +100,7 @@ links and staying inside it are HOST-PATH-IN's."))
       (error 'vfs-error :message "Not a directory."))
     (list-directory host-path
                     :root-real (real-path (mapping-host-path mapping))
-                    :writable (mapping-writable mapping))))
+                    :writable (may-write-p mapping))))
 
 (defun open-host-file (host-path flags &optional (mode #o644))
   "A stream of octets on HOST-PATH, opened with FLAGS and never through a
@@ -169,15 +169,15 @@ symbolic link."
 ;;; The root ---------------------------------------------------------------------------
 
 (defun root-entries (vfs)
-  "The root's entries: one directory for each mapping, whether or not what is
-behind it can be reached just now."
-  (mapcar (lambda (mapping)
-            (handler-case (backend-entry (backend-of mapping) mapping '())
-              (vfs-error ()
-                (make-entry :name (mapping-name mapping) :type :directory
-                            :mode #o555 :links 2 :mtime (get-universal-time)
-                            :writable (mapping-writable mapping)))))
-          (vfs-mappings vfs)))
+  "The root's entries: one directory for each mapping the client may see,
+whether or not what is behind it can be reached just now."
+  (loop for mapping in (vfs-mappings vfs)
+        when (may-read-p mapping)
+          collect (handler-case (backend-entry (backend-of mapping) mapping '())
+                    (vfs-error ()
+                      (make-entry :name (mapping-name mapping) :type :directory
+                                  :mode #o555 :links 2 :mtime (get-universal-time)
+                                  :writable (may-write-p mapping))))))
 
 ;;; Streams over octets in memory ---------------------------------------------------------
 ;;;

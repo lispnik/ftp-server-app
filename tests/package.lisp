@@ -48,3 +48,24 @@ that is removed afterwards."
                       :external-format :utf-8)
     (let ((string (make-string (file-length in))))
       (subseq string 0 (read-sequence string in)))))
+
+;;; Users -------------------------------------------------------------------------
+
+(defun add-user (model name password &rest grants)
+  "Add a user to MODEL, with GRANTS alternating mapping names and levels."
+  (let ((user (fs:accounts-add (fs:model-accounts model) name :password password)))
+    (loop for (mapping-name level) on grants by #'cddr
+          do (setf (fs:user-access (fs:model-accounts model) user mapping-name) level))
+    user))
+
+(defun user-names (model)
+  (mapcar #'fs:user-name (fs:model-users model)))
+
+(defun access-of (model user mapping-name)
+  (fs:user-access (fs:model-accounts model) user mapping-name))
+
+(defun free-local-port ()
+  (let ((probe (fs::listen-on #(127 0 0 1) 0)))
+    (prog1 (fs::socket-port probe)
+      (sb-bsd-sockets:socket-close probe))))
+

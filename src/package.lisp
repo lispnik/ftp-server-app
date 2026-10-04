@@ -23,11 +23,16 @@
    #:settings-file #:load-settings #:save-settings
    #:model #:make-model #:model-load #:model-save #:model-vfs
    #:password-store #:make-password-store #:*password-store*
-   #:model-username #:model-password #:model-port #:model-allow-remote
+   #:model-accounts #:model-users #:model-user #:model-add-user #:model-remove-user
+   #:model-rename-user #:model-set-password #:model-access #:model-set-access
+   #:accounts #:make-accounts #:accounts-add #:accounts-find #:accounts-users
+   #:user #:user-name #:user-password #:user-access #:account-error
+   #:accounts-authenticate #:accounts-access
+   #:model-port #:model-allow-remote
    #:model-bonjour-name #:model-start-at-launch #:model-require-tls
    #:model-tls-description #:*tls-maker* #:model-running-p #:model-advertise-p
    #:model-add-directory #:model-remove-mapping #:model-rename-mapping
-   #:model-set-writable #:model-start #:model-stop #:model-status-text
+   #:model-start #:model-stop #:model-status-text
    #:parse-port
    ;; The application.
    #:main))

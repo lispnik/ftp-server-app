@@ -270,12 +270,12 @@ directory made on each look."
 
 (define-lisp-mapping \"drop\"
   (lisp-directory \"drop\" '() :on-upload (lambda (name octets) (list name octets)))
-  :writable t :description \"(a drop box)\")
+  :description \"(a drop box)\")
 ")
       (multiple-value-bind (mappings problem) (fs:load-init-file (sb-ext:parse-native-namestring init))
         (is (null problem))
         (is (equal '("status" "drop") (mapcar #'first mappings)))
-        (is (equal '(nil t) (mapcar #'third mappings)))
+        (is (equal '("(made by init.lisp)" "(a drop box)") (mapcar #'third mappings)))
         (let ((model (fs:make-model)))
           (fs:model-add-directory model "/tmp")
           (is (equal '("init.lisp mapped status" "init.lisp mapped drop")
@@ -283,7 +283,6 @@ directory made on each look."
           (is (equal '("tmp" "status" "drop") (mapping-names model)))
           (let ((drop (fs:vfs-find (fs:model-vfs model) "drop")))
             (is-false (fs:host-mapping-p drop))
-            (is-true (fs:mapping-writable drop))
             (is (string= "(a drop box)" (fs::backend-description (fs:mapping-backend drop)))))
           ;; Again, as a second launch would: the names are taken.
           (is (search "already" (first (fs::model-add-lisp-mappings model mappings)))))))))
@@ -298,7 +297,8 @@ directory made on each look."
 ")
       (multiple-value-bind (mappings problem) (fs:load-init-file (sb-ext:parse-native-namestring init))
         (is (equal '("first") (mapcar #'first mappings)))
-        (is (search "something is wrong" problem))))))
+        (is (search "something is wrong" problem))
+        (is (search "line 3" problem) "and where")))))
 
 (test without-init-lisp-there-is-nothing-to-do
   (with-temporary-directory (directory)

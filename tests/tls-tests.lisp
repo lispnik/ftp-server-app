@@ -270,9 +270,8 @@ server made for itself, so there is nothing to check it against."
     (let ((model (fs:make-model))
           (pathname (sb-ext:parse-native-namestring (concatenate 'string directory "/")))
           (delay fs::*login-failure-delay*))
-      (setf (fs:model-username model) "user"
-            (fs:model-password model) "secret"
-            (fs:model-require-tls model) t
+      (add-user model "user" "secret")
+      (setf (fs:model-require-tls model) t
             (fs:model-port model) (let ((probe (fs::listen-on #(127 0 0 1) 0)))
                                     (prog1 (fs::socket-port probe)
                                       (sb-bsd-sockets:socket-close probe)))

@@ -107,14 +107,23 @@ each a list of the time, the user, the address and the message."
       (sb-bsd-sockets:socket-close probe))))
 
 (defun fill-in (controller &key (port (free-port)))
-  (set-field (fs::controller-username-field controller) "ann")
-  (set-field (fs::controller-password-field controller) "pw")
+  "Make the server ready to start: a user ann, password pw, and a port."
+  (unless (fs:accounts-find (fs:model-accounts (fs::controller-model controller)) "ann")
+    (add-user (fs::controller-model controller) "ann" "pw"))
   (set-field (fs::controller-port-field controller) (format nil "~d" port))
   port)
 
-(test the-window-has-a-table-with-three-columns
+(defun grant (controller user-name mapping-name level)
+  (let ((model (fs::controller-model controller)))
+    (setf (fs:user-access (fs:model-accounts model)
+                          (fs:accounts-find (fs:model-accounts model) user-name)
+                          mapping-name)
+          level)))
+
+(test the-window-has-a-table-with-two-columns
   (with-controller (controller)
-    (is (= 3 (objc:invoke (table controller) "numberOfColumns")))
+    ;; Who may write is the Users window's business now, not a column here.
+    (is (= 2 (objc:invoke (table controller) "numberOfColumns")))
     (is (= 0 (objc:invoke (table controller) "numberOfRows")))
     (is (string= "Start" (title (fs::controller-start-button controller))))
     (is (string= "Stopped." (status controller)))
@@ -126,7 +135,6 @@ each a list of the time, the user, the address and the message."
     (is (= 1 (objc:invoke (table controller) "numberOfRows")))
     (is (string= "tmp" (cell-string controller "name" 0)))
     (is (string= "/tmp" (cell-string controller "path" 0)))
-    (is-false (cell-flag controller "writable" 0))
     ;; Something that is not a directory is not added, and the window says so.
     (is (null (fs::controller-add-directory controller "/etc/hosts")))
     (is (= 1 (objc:invoke (table controller) "numberOfRows")))
@@ -143,16 +151,6 @@ each a list of the time, the user, the address and the message."
     (set-cell controller "name" 0 "var")
     (is (equal '("tempdir" "var") (mapping-names (fs::controller-model controller))))
     (is (search "already" (status controller)))))
-
-(test the-checkbox-makes-a-mapping-writable
-  (with-controller (controller)
-    (fs::controller-add-directory controller "/tmp")
-    (set-cell controller "writable" 0 (objc:invoke "NSNumber" "numberWithBool:" t))
-    (is-true (fs:mapping-writable (first (fs:vfs-mappings
-                                          (fs:model-vfs (fs::controller-model controller))))))
-    (is-true (cell-flag controller "writable" 0))
-    (set-cell controller "writable" 0 (objc:invoke "NSNumber" "numberWithBool:" nil))
-    (is-false (cell-flag controller "writable" 0))))
 
 (test remove-takes-away-the-selected-row
   (with-controller (controller)
@@ -173,14 +171,14 @@ each a list of the time, the user, the address and the message."
     (set-cell controller "name" 0 "tempdir")
     (let ((settings (fs:load-settings
                      (sb-ext:parse-native-namestring (path directory "settings.lisp")))))
-      (is (equal '((:name "tempdir" :path "/tmp" :writable nil))
+      (is (equal '((:name "tempdir" :path "/tmp"))
                  (getf settings :mappings))))))
 
 (test start-wants-credentials-and-a-port
   (with-controller (controller)
     (objc:invoke (target controller) "toggleServer:" (cffi:null-pointer))
     (is-false (fs:model-running-p (fs::controller-model controller)))
-    (is (search "password" (status controller)))
+    (is (search "Users" (status controller)))
     (fill-in controller)
     (set-field (fs::controller-port-field controller) "ftp")
     (objc:invoke (target controller) "toggleServer:" (cffi:null-pointer))
@@ -194,6 +192,7 @@ each a list of the time, the user, the address and the message."
           (button (fs::controller-start-button controller)))
       (fs::controller-add-directory controller "/tmp")
       (set-cell controller "name" 0 "tempdir")
+      (grant controller "ann" "tempdir" :read)
       (objc:invoke button "performClick:" (cffi:null-pointer))
       (is-true (fs:model-running-p (fs::controller-model controller)))
       (is (string= "Stop" (title button)))
@@ -369,24 +368,46 @@ each a list of the time, the user, the address and the message."
     (is-false (fs::keychain-delete service "FTP login"))
     (is (null (fs::keychain-get service "FTP login")))))
 
-(test the-model-saves-its-password-to-the-keychain
+(test the-model-saves-each-users-password-to-the-keychain
   (with-keychain (service)
     (with-temporary-directory (directory)
-      (with-password-store ((fs::keychain-password-store service))
-        (let ((model (fs:make-model)))
-          (setf (fs:model-username model) "ann"
-                (fs:model-password model) "hunter2")
-          (is-true (fs:model-save model (settings-in directory)))
-          (is (null (search "hunter2" (read-file (path directory "settings.lisp")))))
-          (is (string= "hunter2" (fs::keychain-get service "FTP login")))))
-      ;; A new store, as a new launch would have.
-      (with-password-store ((fs::keychain-password-store service))
-        (let ((loaded (fs:model-load (settings-in directory))))
-          (is (string= "hunter2" (fs:model-password loaded)))
-          ;; An empty password removes the item rather than keeping an empty one.
-          (setf (fs:model-password loaded) "")
-          (is-true (fs:model-save loaded (settings-in directory)))
-          (is (null (fs::keychain-get service "FTP login"))))))))
+      (let ((file (sb-ext:parse-native-namestring (path directory "settings.lisp"))))
+        (with-password-store ((fs::keychain-password-store service))
+          (let ((model (fs:make-model)))
+            (add-user model "ann" "hunter2")
+            (add-user model "bob" "swordfish")
+            (is-true (fs:model-save model file))
+            (is (null (search "hunter2" (read-file (path directory "settings.lisp")))))
+            (is (string= "hunter2" (fs::keychain-get service "ann")))
+            (is (string= "swordfish" (fs::keychain-get service "bob")))))
+        ;; A new store, as a new launch would have.
+        (with-password-store ((fs::keychain-password-store service))
+          (let* ((loaded (fs:model-load file))
+                 (ann (first (fs:model-users loaded)))
+                 (bob (second (fs:model-users loaded))))
+            (is (string= "hunter2" (fs:user-password ann)))
+            (is (string= "swordfish" (fs:user-password bob)))
+            ;; Removing a user takes their item out of the keychain.
+            (fs:model-remove-user loaded bob)
+            (is (null (fs::keychain-get service "bob")))))
+        (ignore-errors (fs::keychain-delete service "bob"))))))
+
+(test the-one-login-of-the-old-version-moves-to-its-user
+  ;; The version with one user kept its password under "FTP login".
+  (with-keychain (service)
+    (with-temporary-directory (directory)
+      (write-file (path directory "settings.lisp")
+                  "(:version 1 :username \"ann\" :password \"\" :mappings ())")
+      (fs::keychain-set service "FTP login" "from-before")
+      (unwind-protect
+           (with-password-store ((fs::keychain-password-store service))
+             (let ((loaded (fs:model-load (sb-ext:parse-native-namestring
+                                           (path directory "settings.lisp")))))
+               (is (string= "from-before" (fs:user-password (first (fs:model-users loaded)))))
+               (is (string= "from-before" (fs::keychain-get service "ann")))
+               (is (null (fs::keychain-get service "FTP login")) "and the old item is gone")))
+        (ignore-errors (fs::keychain-delete service "FTP login"))
+        (ignore-errors (fs::keychain-delete service "ann"))))))
 
 (test requiring-tls-is-a-setting-like-the-others
   (with-controller (controller directory)
@@ -514,3 +535,145 @@ each a list of the time, the user, the address and the message."
     (is (string= "gen" (cell-string controller "name" 1)))
     (is (string= "(made by init.lisp)" (cell-string controller "path" 1)))
     (is (string= "/tmp" (cell-string controller "path" 0)))))
+
+;;; The Users window -------------------------------------------------------------------
+
+(defun users-window (controller)
+  "The Users window's controller for CONTROLLER, made now."
+  (setf fs::*users-controller* nil)
+  (fs::show-users-window controller))
+
+(defun users-target (users) (objc:objc-object-pointer users))
+
+(defun users-cell (users table key row)
+  (objc:invoke-into 'string (users-target users)
+                    "tableView:objectValueForTableColumn:row:"
+                    table (objc:invoke table "tableColumnWithIdentifier:" key) row))
+
+(defun access-shown (users row)
+  "The index the access popup shows in ROW: 0 none, 1 read, 2 read and write."
+  (let ((table (fs::users-access-table users)))
+    (objc:invoke (objc:invoke (users-target users)
+                              "tableView:objectValueForTableColumn:row:"
+                              table (objc:invoke table "tableColumnWithIdentifier:" "access")
+                              row)
+                 "integerValue")))
+
+(defun choose-access (users row index)
+  (let ((table (fs::users-access-table users)))
+    (objc:invoke (users-target users) "tableView:setObjectValue:forTableColumn:row:"
+                 table (objc:invoke "NSNumber" "numberWithInteger:" index)
+                 (objc:invoke table "tableColumnWithIdentifier:" "access") row)))
+
+(defmacro with-users-window ((controller users &optional (directory (gensym "DIRECTORY")))
+                             &body body)
+  `(with-controller (,controller ,directory)
+     (let ((,users (users-window ,controller)))
+       (unwind-protect (progn ,@body)
+         (objc:invoke (fs::users-window ,users) "close")
+         (setf fs::*users-controller* nil)))))
+
+(test the-users-window-adds-names-and-removes-users
+  (with-users-window (controller users)
+    (let ((model (fs::controller-model controller))
+          (table (fs::users-users-table users)))
+      (is (= 0 (objc:invoke table "numberOfRows")))
+      (is-false (objc:invoke-bool (fs::users-remove-button users) "isEnabled"))
+      (is-false (objc:invoke-bool (fs::users-password-field users) "isEnabled"))
+      (is (= 0 (fs::users-add-user users)))
+      (is (= 1 (objc:invoke table "numberOfRows")))
+      (is (string= "user" (users-cell users table "name" 0)))
+      (is-true (objc:invoke-bool (fs::users-password-field users) "isEnabled"))
+      ;; Renamed in place.
+      (objc:invoke (users-target users) "tableView:setObjectValue:forTableColumn:row:"
+                   table "ann" (objc:invoke table "tableColumnWithIdentifier:" "name") 0)
+      (is (equal '("ann") (mapcar #'fs:user-name (fs:model-users model))))
+      ;; Not onto another.
+      (fs::users-add-user users)
+      (objc:invoke (users-target users) "tableView:setObjectValue:forTableColumn:row:"
+                   table "ANN" (objc:invoke table "tableColumnWithIdentifier:" "name") 1)
+      (is (equal '("ann" "user") (mapcar #'fs:user-name (fs:model-users model))))
+      (is (search "already"
+                  (objc:invoke-into 'string (fs::users-message-label users) "stringValue")))
+      ;; Removed.
+      (objc:invoke (fs::users-remove-button users) "performClick:" (cffi:null-pointer))
+      (is (equal '("ann") (mapcar #'fs:user-name (fs:model-users model)))))))
+
+(test the-password-goes-to-the-user-who-is-selected
+  (with-users-window (controller users directory)
+    (let ((model (fs::controller-model controller)))
+      (fs::users-add-user users)
+      (fs::users-add-user users)
+      (fs::users-select-row users 0)
+      (set-field (fs::users-password-field users) "first-password")
+      (objc:invoke (users-target users) "passwordChanged:" (cffi:null-pointer))
+      ;; Typed, and then another user chosen without pressing Return.
+      (fs::users-select-row users 1)
+      (is (string= "" (objc:invoke-into 'string (fs::users-password-field users) "stringValue"))
+          "the field shows the new user's")
+      (set-field (fs::users-password-field users) "second-password")
+      (objc:invoke (users-target users) "tableViewSelectionDidChange:"
+                   (objc:invoke "NSNotification" "notificationWithName:object:"
+                                "NSTableViewSelectionDidChangeNotification"
+                                (fs::users-users-table users)))
+      (is (equal '("first-password" "second-password")
+                 (mapcar #'fs:user-password (fs:model-users model))))
+      ;; And saved.
+      (is (equal '("first-password" "second-password")
+                 (mapcar (lambda (user) (getf user :password))
+                         (getf (fs:load-settings (sb-ext:parse-native-namestring
+                                                  (path directory "settings.lisp")))
+                               :users)))))))
+
+(test the-access-table-lists-every-mapping-for-the-selected-user
+  (with-users-window (controller users directory)
+    (let* ((model (fs::controller-model controller))
+           (access-table (fs::users-access-table users)))
+      (fs::controller-add-directory controller "/tmp")
+      (fs::controller-add-directory controller "/var")
+      (fs::users-add-user users)
+      (fs::users-select-row users 0)
+      (is (= 2 (objc:invoke access-table "numberOfRows")))
+      (is (string= "tmp" (users-cell users access-table "mapping" 0)))
+      (is (= 0 (access-shown users 0)) "no access to begin with")
+      (choose-access users 0 2)
+      (choose-access users 1 1)
+      (let ((user (first (fs:model-users model))))
+        (is (eq :read-write (fs:model-access model user (fs:vfs-find (fs:model-vfs model) "tmp"))))
+        (is (eq :read (fs:model-access model user (fs:vfs-find (fs:model-vfs model) "var")))))
+      (is (= 2 (access-shown users 0)))
+      (is (= 1 (access-shown users 1)))
+      ;; Saved with the user.
+      (is (equal '(("var" . :read) ("tmp" . :read-write))
+                 (getf (first (getf (fs:load-settings (sb-ext:parse-native-namestring
+                                                       (path directory "settings.lisp")))
+                                    :users))
+                       :access)))
+      ;; A mapping added in the main window appears here too.
+      (fs::controller-add-directory controller "/usr")
+      (is (= 3 (objc:invoke access-table "numberOfRows")))
+      (choose-access users 0 0)
+      (is (= 0 (access-shown users 0))))))
+
+(test the-main-window-starts-a-server-for-the-users-window-users
+  (with-users-window (controller users)
+    (let ((port (free-port))
+          (delay fs::*login-failure-delay*))
+      (set-field (fs::controller-port-field controller) (format nil "~d" port))
+      (fs::controller-add-directory controller "/tmp")
+      (fs::users-add-user users)
+      (fs::users-select-row users 0)
+      (set-field (fs::users-password-field users) "pw")
+      (objc:invoke (users-target users) "passwordChanged:" (cffi:null-pointer))
+      (choose-access users 0 1)
+      (setf fs::*login-failure-delay* 0)
+      (unwind-protect
+           (progn
+             (is-true (fs::controller-start controller))
+             (with-client (client port)
+               (is (= 230 (login client "user" "pw")))
+               (is (equal '("tmp") (lines-of (nth-value 1 (fetch client "NLST")))))
+               ;; Taken away in the window, gone from the next listing.
+               (choose-access users 0 0)
+               (is (equal '() (lines-of (nth-value 1 (fetch client "NLST")))))))
+        (setf fs::*login-failure-delay* delay)))))

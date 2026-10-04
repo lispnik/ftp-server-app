@@ -115,24 +115,39 @@ Signals KEYCHAIN-ERROR if there is one and it may not be read."
 
 ;;; The store the model saves through -------------------------------------------------
 
-(defun keychain-password-store (&optional (service +keychain-service+)
-                                          (account +keychain-account+))
-  "A password store on the keychain item for SERVICE and ACCOUNT.
+(defun adopt-single-user-password (service name)
+  "The password kept by a version with one user, under the account FTP login,
+moved to the user NAME, or NIL if there is none."
+  (let ((password (ignore-errors (keychain-get service +keychain-account+))))
+    (when password
+      (keychain-set service name password)
+      (ignore-errors (keychain-delete service +keychain-account+))
+      password)))
 
-It remembers what it last read or wrote, and saving the same password again
-does nothing: the window saves its settings at every change, and the keychain
-is not something to be asked that often."
-  (let ((known nil))
+(defun keychain-password-store (&optional (service +keychain-service+))
+  "A password store on keychain items for SERVICE, one for each user, filed
+under the user's name.
+
+It remembers what it last read or wrote for each user, and saving the same
+password again does nothing: the window saves its settings at every change,
+and the keychain is not something to be asked that often."
+  (let ((known (make-hash-table :test 'equal)))
     (make-password-store
-     :fetch (lambda ()
-              (setf known (or (keychain-get service account) "")))
-     :store (lambda (password)
-              (unless (equal password known)
+     :fetch (lambda (name)
+              (setf (gethash name known)
+                    (or (keychain-get service name)
+                        (adopt-single-user-password service name)
+                        "")))
+     :store (lambda (name password)
+              (unless (equal password (gethash name known))
                 (if (string= password "")
-                    (keychain-delete service account)
-                    (keychain-set service account password))
-                (setf known password))
-              t))))
+                    (keychain-delete service name)
+                    (keychain-set service name password))
+                (setf (gethash name known) password))
+              t)
+     :forget (lambda (name)
+               (remhash name known)
+               (keychain-delete service name)))))
 
 (defun choose-password-store ()
   "Where the application keeps its password: the keychain, unless the settings

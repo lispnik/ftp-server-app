@@ -46,6 +46,31 @@
   "Whether MAPPING is a directory on this host."
   (null (mapping-backend mapping)))
 
+;;; Access ----------------------------------------------------------------------
+;;;
+;;; What the client being served may do with a mapping: NIL, nothing -- it is
+;;; not there as far as they are concerned; :READ; or :READ-WRITE.  A session
+;;; binds *ACCESS* to a function of a mapping that says, for its own user,
+;;; while it runs each command.
+
+(defun default-access (mapping)
+  "Access with no users to tell apart: everyone may read every mapping, and
+write those marked writable.  What a server has unless it is told otherwise."
+  (if (mapping-writable mapping) :read-write :read))
+
+(defvar *access* 'default-access
+  "A function of a mapping answering NIL, :READ or :READ-WRITE for whoever is
+being served.")
+
+(defun access-to (mapping)
+  (funcall *access* mapping))
+
+(defun may-read-p (mapping)
+  (and (access-to mapping) t))
+
+(defun may-write-p (mapping)
+  (eq :read-write (access-to mapping)))
+
 (defclass vfs ()
   ((mappings :initform '() :accessor %vfs-mappings)
    (lock :initform (sb-thread:make-mutex :name "ftp-server vfs") :reader vfs-lock))

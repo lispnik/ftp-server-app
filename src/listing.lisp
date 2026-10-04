@@ -80,12 +80,12 @@ outside ROOT-REAL or is nothing: a client could not open it anyway."
   "MAPPING as an entry of the root: a directory, whether or not the host
 directory behind it can be reached just now."
   (let ((entry (host-entry (mapping-name mapping) (mapping-host-path mapping)
-                           :writable (mapping-writable mapping))))
+                           :writable (may-write-p mapping))))
     (if (and entry (eq :directory (entry-type entry)))
         entry
         (make-entry :name (mapping-name mapping) :type :directory
                     :mode #o555 :links 2 :mtime (get-universal-time)
-                    :writable (mapping-writable mapping)))))
+                    :writable (may-write-p mapping)))))
 
 (defun root-entry ()
   "The root itself."

@@ -14,10 +14,11 @@
                 :serial t
                 :components ((:file "package")
                              (:file "vfs")
+                             (:file "net")
+                             (:file "accounts")
                              (:file "listing")
                              (:file "backend")
                              (:file "lisp-backend")
-                             (:file "net")
                              (:file "server")
                              (:file "protocol")
                              (:file "session")
@@ -48,6 +49,7 @@
                              (:file "bonjour")
                              (:file "keychain")
                              (:file "window")
+                             (:file "users-window")
                              (:file "app"))))
   :in-order-to ((test-op (test-op "ftp-server/tests"))))
 
@@ -64,6 +66,7 @@
                              (:file "server-tests")
                              (:file "tls-tests")
                              (:file "lisp-backend-tests")
+                             (:file "access-tests")
                              (:file "model-tests")
                              (:file "ui-tests"))))
   ;; FIVEAM:RUN! prints failures but returns NIL, and ASDF discards what a
