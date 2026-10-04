@@ -31,8 +31,16 @@ a login with the wrong password.
 Each release has two disk images, built and checked by CI: `-arm64` for Apple
 silicon and `-x86_64` for Intel. Open the one for your Mac and drag FTP Server
 onto Applications. Builds are signed ad hoc unless the repository has a
-Developer ID set up (see `.github/workflows/macos.yml`), so the first time,
-macOS asks: choose Open Anyway in System Settings › Privacy & Security.
+Developer ID set up, so the first time, macOS asks: choose Open Anyway in
+System Settings › Privacy & Security.
+
+To have CI sign with your Developer ID and notarise the disk images, fill in
+the placeholders at the top of `tools/set-github-secrets.sh` -- the paths of
+your exported `.p12` and App Store Connect `.p8`, your signing identity, and
+the key's two IDs -- and run it, with `--dry-run` first. It checks that the
+password opens the `.p12`, that the certificate in it is the identity you
+named and has its key, and then sets the six secrets with `gh`. The comments
+at its top say where each thing comes from.
 
 A release is made by pushing a tag `v` followed by the version in
 `ftp-server-app.asd`, for example `v0.1.0`; CI refuses a tag that does not
