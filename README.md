@@ -26,6 +26,18 @@ The activity above is real: `curl` sessions against the running server,
 including an upload bob was refused, a folder he was told is not there, and
 a login with the wrong password.
 
+## Downloading
+
+Each release has two disk images, built and checked by CI: `-arm64` for Apple
+silicon and `-x86_64` for Intel. Open the one for your Mac and drag FTP Server
+onto Applications. Builds are signed ad hoc unless the repository has a
+Developer ID set up (see `.github/workflows/macos.yml`), so the first time,
+macOS asks: choose Open Anyway in System Settings › Privacy & Security.
+
+A release is made by pushing a tag `v` followed by the version in
+`ftp-server-app.asd`, for example `v0.1.0`; CI refuses a tag that does not
+match. Every other push keeps the two disk images as the run's artifacts.
+
 ## Building
 
 ```sh
@@ -34,6 +46,8 @@ make test    # the FiveAM suite
 make app     # build/FTP Server.app
 make run     # run from source, unbundled
 make icon    # draw res/icon.png again
+make dmg     # dist/FTP-Server-<version>-<arch>.dmg, for this Mac's architecture
+tools/check-dmg.sh dist/*.dmg   # mount it, run the app from it, and talk FTP to it
 ```
 
 Use an SBCL built `--with-sb-safepoint`: the bundle ships the runtime of

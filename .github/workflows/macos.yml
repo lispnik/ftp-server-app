@@ -1,4 +1,18 @@
-# Build a safepoint SBCL, run the suite, build the bundle, and talk FTP to it.
+# Build a safepoint SBCL, run the suite, build the bundle, talk FTP to it, and
+# put it in a disk image -- on Apple silicon and on Intel.  A tag v<version>
+# makes a release of the two disk images.
+#
+# SIGNING.  Without secrets the application is signed ad hoc: it runs, and
+# macOS asks before opening it the first time.  With these repository secrets
+# it is signed with a Developer ID and the disk image notarised and stapled:
+#
+#   MACOS_CERTIFICATE_P12       the Developer ID Application certificate and
+#                               its key, exported as .p12, base64
+#   MACOS_CERTIFICATE_PASSWORD  the .p12's password
+#   MACOS_SIGNING_IDENTITY      "Developer ID Application: Name (TEAMID)"
+#   NOTARY_KEY_P8               an App Store Connect API key (.p8), base64
+#   NOTARY_KEY_ID               its key ID
+#   NOTARY_ISSUER               its issuer ID
 #
 # WHY SAFEPOINTS.  The server's threads share the image with AppKit, and on
 # macOS a garbage collection that catches libdispatch worker threads inside
@@ -44,6 +58,16 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@v7
+
+      - name: A release tag is the version the application says
+        # Before an hour of building, not after it.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/.*:version "\(.*\)".*/\1/p' ftp-server-app.asd | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::the tag is $GITHUB_REF_NAME but ftp-server-app.asd says version $version" >&2
+            exit 1
+          fi
 
       - name: Settle on where the safepoint SBCL lives
         # Outside the workspace: SBCL's sources must never be on the registry.
@@ -118,6 +142,33 @@ jobs:
           # checks.  Said out loud, not failed: a runner may have no display.
           grep -E "^ +Skip: +[1-9]" test.log && echo "::warning::some tests were skipped; see the log" || true
 
+      - name: Set up a Developer ID, if there is one
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          if [ -z "$CERTIFICATE" ] || [ -z "$IDENTITY" ]; then
+            echo "no Developer ID: the application is signed ad hoc"
+            exit 0
+          fi
+          set -eu
+          # A keychain of this run's own, unlocked, with codesign allowed to
+          # use the key without asking anyone.
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(openssl rand -hex 16)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" \
+            -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          # The .asd and the Makefile both read this.
+          echo "MACOS_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
       - name: Build the bundle
         run: |
           set -eux
@@ -171,6 +222,40 @@ jobs:
           kill "$APP_PID" || true
           cat "$MACOS_APP_LOG"
 
+      - name: Make the disk image
+        run: |
+          set -eux
+          make dmg SBCL="$SBCL_SAFEPOINT"
+          echo "DMG=$(ls dist/*.dmg)" >> "$GITHUB_ENV"
+
+      - name: Notarise the disk image, if there is a Developer ID
+        env:
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+        run: |
+          if [ -z "${MACOS_SIGNING_IDENTITY:-}" ] || [ -z "$NOTARY_KEY_P8" ]; then
+            echo "not notarised: there is no Developer ID or no notary key"
+            exit 0
+          fi
+          set -eu
+          echo "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          make notarize-dmg NOTARY_KEY="$RUNNER_TEMP/notary.p8" \
+            NOTARY_KEY_ID="$NOTARY_KEY_ID" NOTARY_ISSUER="$NOTARY_ISSUER"
+          rm -f "$RUNNER_TEMP/notary.p8"
+
+      - name: Check the disk image
+        # Mounted and run from, as a download would be: the application in it
+        # serves FTP and FTPS, on its own OpenSSL.
+        run: perl -e 'alarm shift; exec @ARGV' 300 tools/check-dmg.sh "$DMG"
+
+      - name: Keep the disk image
+        uses: actions/upload-artifact@v7
+        with:
+          name: dmg-${{ matrix.arch }}
+          path: dist/*.dmg
+          if-no-files-found: error
+
       - name: Keep the logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -180,3 +265,44 @@ jobs:
             test.log
             ${{ runner.temp }}/selftest/bundle.log
           if-no-files-found: ignore
+
+  release:
+    # Both disk images, on a release named for the tag.
+    name: Release the disk images
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch the disk images
+        uses: actions/download-artifact@v8
+        with:
+          pattern: dmg-*
+          merge-multiple: true
+          path: dist
+
+      - name: Make the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eux
+          ls -l dist
+          test "$(ls dist/*.dmg | wc -l)" -eq 2
+          cat > notes.md <<'NOTES'
+          FTP Server for macOS, built by CI from this tag.
+
+          - **Apple silicon** (M1 and later): `FTP-Server-*-arm64.dmg`
+          - **Intel**: `FTP-Server-*-x86_64.dmg`
+
+          Open the disk image and drag **FTP Server** onto **Applications**.
+
+          If macOS says it cannot check the application for malicious software,
+          the build was not signed with a Developer ID. Open **System Settings ›
+          Privacy & Security** and choose **Open Anyway**, or run:
+
+              xattr -dr com.apple.quarantine "/Applications/FTP Server.app"
+          NOTES
+          gh release create "$GITHUB_REF_NAME" dist/*.dmg \
+            --title "FTP Server $GITHUB_REF_NAME" --notes-file notes.md
