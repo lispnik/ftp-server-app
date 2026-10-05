@@ -80,10 +80,11 @@ if (( problems > 0 )); then
   exit 1
 fi
 
+# Logged in first: the lookup below fails without it, and less helpfully.
+gh auth status > /dev/null 2>&1 || { echo "error: gh is not logged in; run gh auth login" >&2; exit 1; }
 if [[ -z "$REPOSITORY" ]]; then
   REPOSITORY="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
 fi
-gh auth status > /dev/null 2>&1 || { echo "error: gh is not logged in; run gh auth login" >&2; exit 1; }
 
 # The .p12's password: asked for, not kept.
 if [[ -z "${P12_PASSWORD:-}" ]]; then
@@ -95,10 +96,16 @@ export P12_PASSWORD
 # That the password opens the .p12, and that the certificate in it is the
 # identity named above -- or CI would fail at the first codesign, an hour in.
 # macOS's own openssl, which reads the older encryption Keychain Access uses.
+#
+# The name is printed a field to a line and in UTF-8, so that it can be taken
+# whole: on one line, a comma in it ("Acme, Inc.") looks like the end of it,
+# and a letter outside ASCII ("Müller") comes out escaped.
 subject="$(/usr/bin/openssl pkcs12 -in "$CERTIFICATE_P12" -nokeys -passin env:P12_PASSWORD 2>/dev/null \
-           | /usr/bin/openssl x509 -noout -subject 2>/dev/null)" \
+           | /usr/bin/openssl x509 -noout -subject -nameopt utf8,sep_multiline 2>/dev/null)" \
   || { echo "error: could not open $CERTIFICATE_P12 with that password" >&2; exit 1; }
-common_name="$(sed -n 's/.*CN *= *\([^,/]*\).*/\1/p' <<< "$subject" | sed 's/ *$//')"
+[[ -n "$subject" ]] \
+  || { echo "error: could not open $CERTIFICATE_P12 with that password" >&2; exit 1; }
+common_name="$(sed -n 's/^ *CN=//p' <<< "$subject" | head -1)"
 if [[ "$common_name" != "$SIGNING_IDENTITY" ]]; then
   echo "error: the certificate in $CERTIFICATE_P12 is \"$common_name\"," >&2
   echo "       but SIGNING_IDENTITY is \"$SIGNING_IDENTITY\"" >&2
